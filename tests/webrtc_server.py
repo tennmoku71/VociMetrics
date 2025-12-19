@@ -30,6 +30,43 @@ async def offer(request):
             await pc.close()
             pcs.discard(pc)
 
+    # 録音した10秒の音声ファイルを送信
+    audio_file = Path("tests/test_recording.wav")
+    if not audio_file.exists():
+        # フォールバック: hello.mp3を使用
+        audio_file = Path("tests/hello.mp3")
+    
+    if audio_file.exists():
+        logger.info(f"[Server] Sending audio file: {audio_file}")
+        try:
+            # MediaPlayerで直接送信（10秒間）
+            player = MediaPlayer(str(audio_file))
+            pc.addTrack(player.audio)
+            logger.info("[Server] Audio track added to peer connection")
+        except Exception as e:
+            logger.error(f"[Server] Failed to add audio track: {e}", exc_info=True)
+    else:
+        logger.warning(f"[Server] Audio file not found: {audio_file}")
+    
+    # 接続状態の監視と10秒後の切断
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        logger.info(f"[Server] Connection state: {pc.connectionState}")
+        if pc.connectionState == "connected":
+            logger.info("[Server] Connection established, audio should be streaming...")
+            
+            # 10秒後に接続を閉じる
+            async def close_after_duration():
+                await asyncio.sleep(10)
+                logger.info("[Server] 10 seconds elapsed, closing connection...")
+                if pc.connectionState != "closed":
+                    await pc.close()
+                    pcs.discard(pc)
+            
+            asyncio.create_task(close_after_duration())
+        elif pc.connectionState == "closed":
+            logger.info("[Server] Connection closed")
+
     @pc.on("track")
     async def on_track(track):
         logger.info(f"[Server] Received track: {track.kind}")
@@ -39,14 +76,11 @@ async def offer(request):
             recorder = MediaRecorder("data/reports/received_audio.wav")
             recorder.addTrack(track)
             await recorder.start()
-            
-            # テスト用の音声ファイルを送信（エコーバック）
-            # 実際の実装では、ここで音声処理やAI応答を実装
             logger.info("[Server] Audio track received, recording...")
             
             # 接続が閉じられたら記録を停止
             @pc.on("connectionstatechange")
-            async def on_connectionstatechange():
+            async def on_connectionstatechange_for_recorder():
                 if pc.connectionState == "closed":
                     await recorder.stop()
                     logger.info("[Server] Recording stopped")

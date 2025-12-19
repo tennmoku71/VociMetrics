@@ -53,6 +53,10 @@ data/audio_source/*.m4a
 *.mp3
 !tests/hello.mp3
 
+# Recorded audio files
+tests/*.wav
+scripts/*.wav
+
 # Environment variables
 .env
 .env.local

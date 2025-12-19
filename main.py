@@ -110,10 +110,9 @@ async def main():
         except TimeoutError:
             logger.warning("Connection timeout, but continuing...")
         
-        # 音声送信が完了するまで少し待機
-        if audio_file:
-            logger.info("Waiting for audio transmission to complete...")
-            await asyncio.sleep(3)  # 音声ファイルの長さに応じて調整
+        # サーバーからの音声ストリームを10秒間待機
+        logger.info("Waiting for 10-second audio stream from server...")
+        await asyncio.sleep(12)  # 10秒のストリーム + バッファ
         
         # 接続を閉じる
         await webrtc_client.close()
