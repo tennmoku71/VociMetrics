@@ -1,0 +1,7 @@
+aiortc>=1.6.0
+aiohttp>=3.9.0
+asyncio>=3.4.3
+numpy>=1.24.0
+pydub>=0.25.1
+python-dotenv>=1.0.0
+
