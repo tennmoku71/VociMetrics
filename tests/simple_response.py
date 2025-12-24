@@ -204,14 +204,42 @@ async def websocket_handler(request):
                             else:
                                 print(f"[WARNING] scipyがインストールされていないため、リサンプリングをスキップします。")
                         
-                        # チャンクに分けて送信（10msごと）
+                        # 10秒間の送信を保証
+                        total_duration_seconds = 10.0  # 総送信時間（10秒）
                         chunk_size = int(input_sample_rate * 0.01)  # 10ms
+                        chunk_duration = 0.01  # 10ms
+                        total_chunks = int(total_duration_seconds / chunk_duration)  # 総チャンク数
+                        
+                        # 無音チャンク（0で埋める）
+                        silence_chunk = np.zeros(chunk_size, dtype=np.int16)
+                        
+                        # 音声データをチャンクに分割
+                        audio_chunks = []
                         for i in range(0, len(audio_data), chunk_size):
                             chunk = audio_data[i:i+chunk_size]
-                            await ws.send_bytes(chunk.tobytes())
-                            await asyncio.sleep(0.01)  # 10ms待機
+                            # チャンクサイズに満たない場合は0でパディング
+                            if len(chunk) < chunk_size:
+                                padded_chunk = np.zeros(chunk_size, dtype=np.int16)
+                                padded_chunk[:len(chunk)] = chunk
+                                chunk = padded_chunk
+                            audio_chunks.append(chunk)
                         
-                        print("応答音声の送信が完了しました")
+                        audio_duration = len(audio_data) / input_sample_rate
+                        audio_chunk_count = len(audio_chunks)
+                        print(f"応答音声送信を開始します（総時間: {total_duration_seconds}秒、音声: {audio_duration:.2f}秒、無音: {total_duration_seconds - audio_duration:.2f}秒）")
+                        
+                        # 10秒間、音声または無音を送信
+                        for chunk_idx in range(total_chunks):
+                            if chunk_idx < audio_chunk_count:
+                                # 音声チャンクを送信
+                                await ws.send_bytes(audio_chunks[chunk_idx].tobytes())
+                            else:
+                                # 無音チャンクを送信
+                                await ws.send_bytes(silence_chunk.tobytes())
+                            
+                            await asyncio.sleep(chunk_duration)  # 10ms待機
+                        
+                        print("応答音声の送信が完了しました（10秒間）")
                     else:
                         print(f"応答音声ファイルが見つかりません: {response_audio_file}")
                                 
