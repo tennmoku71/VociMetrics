@@ -1,4 +1,6 @@
-"""Interactive Voice Evaluator (IVE) - メインエントリーポイント"""
+"""Interactive Voice Evaluator (IVE) - メインエントリーポイント
+WebSocketクライアントとして動作（評価ツール）
+"""
 
 import asyncio
 import json
@@ -8,8 +10,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from tester.orchestrator import Orchestrator
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer
+from tester.vad_detector import VADDetector
+import numpy as np
+import soundfile as sf
+import aiohttp
 
 
 def setup_logging(test_id: str, logs_dir: str = "logs"):
@@ -57,7 +61,7 @@ def load_config(config_path: str = "config.json") -> dict:
 
 
 async def main():
-    """WebRTCクライアントとして動作（評価ツール）"""
+    """WebSocketクライアントとして動作（評価ツール）"""
     try:
         # 設定ファイルを読み込み
         config = load_config()
@@ -69,7 +73,7 @@ async def main():
         log_filename = setup_logging(test_id, logs_dir="logs")
         
         logger.info("=" * 60)
-        logger.info(f"Interactive Voice Evaluator (IVE) - WebRTC Client")
+        logger.info(f"Interactive Voice Evaluator (IVE) - WebSocket Client")
         logger.info(f"Test ID: {test_id}")
         logger.info(f"Log file: {log_filename}")
         logger.info("=" * 60)
@@ -79,6 +83,30 @@ async def main():
         
         # テストを開始（ロガーを初期化）
         await orchestrator.run_test(test_id, test_type="rule")
+        
+        # VAD検出器を初期化（サーバーからの音声を検出）
+        websocket_config = config.get("websocket", {})
+        sample_rate = websocket_config.get("sample_rate", 24000)  # OpenAI Realtime API標準
+        
+        # 音声開始/終了のコールバック
+        def on_bot_speech_start(timestamp: float):
+            """ボット（サーバー）の音声開始を記録"""
+            logger.info(f"[VAD] Bot speech started at {timestamp:.3f}s")
+            orchestrator.logger.log_bot_speech_start()
+        
+        def on_bot_speech_end(timestamp: float):
+            """ボット（サーバー）の音声終了を記録"""
+            logger.info(f"[VAD] Bot speech ended at {timestamp:.3f}s")
+            orchestrator.logger.log_bot_speech_end()
+        
+        vad_detector = VADDetector(
+            sample_rate=sample_rate,
+            threshold=0.5,
+            min_speech_duration_ms=250,
+            min_silence_duration_ms=100,
+            on_speech_start=on_bot_speech_start,
+            on_speech_end=on_bot_speech_end
+        )
         
         # 音声ファイルのパスを取得（コマンドライン引数またはデフォルト）
         audio_file = sys.argv[1] if len(sys.argv) > 1 else "tests/hello.wav"
@@ -91,52 +119,102 @@ async def main():
         else:
             logger.info(f"Using audio file: {audio_file}")
         
-        # WebRTCクライアントを起動
-        pc = RTCPeerConnection()
+        # WebSocketサーバーに接続
+        server_url = websocket_config.get("server_url", "ws://localhost:8765/ws")
+        logger.info(f"Connecting to WebSocket server: {server_url}")
         
-        # 先にOfferを待つ（サーバーが作成する）
-        logger.info("offer.json を待機中...")
-        while not os.path.exists("offer.json"):
-            await asyncio.sleep(0.5)
-        
-        with open("offer.json", "r") as f:
-            offer_data = json.load(f)
-            await pc.setRemoteDescription(RTCSessionDescription(**offer_data))
-        logger.info("offer.json を受信しました。")
-
-        # Offerを受け取った後に、送信したいファイルをトラックに追加
-        if audio_file and os.path.exists(audio_file):
-            player = MediaPlayer(audio_file)
-            pc.addTrack(player.audio)
-            logger.info(f"{audio_file} をセットアップしました。")
-        else:
-            logger.warning("音声ファイルが見つかりません。")
-            return
-
-        # Answerを作成
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        
-        with open("answer.json", "w") as f:
-            json.dump({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}, f)
-        logger.info("answer.json を作成しました。")
-
-        # 音声ファイルの長さ分待機
-        if audio_file:
-            try:
-                import soundfile as sf
-                audio_data, sample_rate = sf.read(audio_file)
-                duration = len(audio_data) / sample_rate
-                logger.info(f"音声ファイルの長さ: {duration:.2f}秒、送信完了を待機中...")
-                await asyncio.sleep(duration + 1.0)  # 送信完了を待つ（少し余裕を持たせる）
-            except Exception as e:
-                logger.warning(f"音声ファイルの長さを取得できませんでした: {e}")
-                await asyncio.sleep(12)  # デフォルトで12秒待機
-        else:
-            await asyncio.sleep(12)
-        
-        logger.info("接続を閉じます...")
-        await pc.close()
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(server_url) as ws:
+                logger.info("WebSocket接続が確立されました")
+                
+                # サーバーからの音声を受信してVADで処理するタスク
+                async def receive_audio():
+                    """サーバーからの音声を受信してVADで処理"""
+                    start_time = asyncio.get_event_loop().time()
+                    try:
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.BINARY:
+                                # バイナリメッセージ（音声データ）
+                                # PCM形式（int16）を想定
+                                audio_data = np.frombuffer(msg.data, dtype=np.int16)
+                                
+                                # タイムスタンプを計算（相対時間）
+                                current_time = asyncio.get_event_loop().time()
+                                relative_time = current_time - start_time
+                                
+                                # VADで処理
+                                vad_detector.process_audio_frame(audio_data, relative_time)
+                                
+                            elif msg.type == aiohttp.WSMsgType.TEXT:
+                                # テキストメッセージ（制御用）
+                                try:
+                                    data = json.loads(msg.data)
+                                    logger.info(f"受信メッセージ: {data}")
+                                except json.JSONDecodeError:
+                                    logger.warning(f"無効なJSONメッセージ: {msg.data}")
+                                    
+                            elif msg.type == aiohttp.WSMsgType.ERROR:
+                                logger.error(f"WebSocketエラー: {ws.exception()}")
+                                break
+                                
+                    except Exception as e:
+                        logger.info(f"[VAD] Audio reception ended: {e}")
+                
+                # 音声受信タスクを開始
+                receive_task = asyncio.create_task(receive_audio())
+                logger.info("[VAD] Started receiving audio and VAD processing...")
+                
+                # 音声ファイルを送信
+                if audio_file:
+                    try:
+                        audio_data, sr = sf.read(audio_file)
+                        
+                        # モノラルに変換
+                        if len(audio_data.shape) > 1:
+                            audio_data = np.mean(audio_data, axis=1)
+                        
+                        # int16に変換
+                        if audio_data.dtype != np.int16:
+                            audio_data = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
+                        
+                        # サンプルレートを24000Hzにリサンプリング（必要に応じて）
+                        if sr != sample_rate:
+                            try:
+                                from scipy import signal
+                                num_samples = int(len(audio_data) * sample_rate / sr)
+                                audio_data = signal.resample(audio_data, num_samples).astype(np.int16)
+                                logger.info(f"サンプルレートを{sr}Hzから{sample_rate}Hzにリサンプリングしました")
+                            except ImportError:
+                                logger.warning(f"scipyがインストールされていないため、リサンプリングをスキップします。"
+                                             f"音声ファイルのサンプルレート({sr}Hz)が期待値({sample_rate}Hz)と異なる場合、"
+                                             f"音声の速度が正しくない可能性があります。")
+                                # リサンプリングできない場合は警告のみ
+                        
+                        logger.info(f"音声ファイルを送信します: {audio_file} ({len(audio_data)/sample_rate:.2f}秒)")
+                        
+                        # チャンクに分けて送信（10msごと）
+                        chunk_size = int(sample_rate * 0.01)  # 10ms
+                        for i in range(0, len(audio_data), chunk_size):
+                            chunk = audio_data[i:i+chunk_size]
+                            await ws.send_bytes(chunk.tobytes())
+                            await asyncio.sleep(0.01)  # 10ms待機
+                        
+                        logger.info("音声ファイルの送信が完了しました")
+                        
+                    except Exception as e:
+                        logger.error(f"音声ファイルの送信エラー: {e}", exc_info=True)
+                else:
+                    # 音声ファイルがない場合は少し待機（サーバーからの応答を待つ）
+                    await asyncio.sleep(2)
+                
+                # 受信タスクをキャンセル
+                receive_task.cancel()
+                try:
+                    await receive_task
+                except asyncio.CancelledError:
+                    pass
+                
+                logger.info("WebSocket接続を閉じます...")
         
         # タイムラインを保存
         timeline_path = orchestrator.logger.save_timeline()
@@ -154,4 +232,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

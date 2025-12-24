@@ -5,21 +5,13 @@ import numpy as np
 from typing import Optional, Callable
 import logging
 
+# webrtcvadのインポート
 try:
-    import torch
-    import onnxruntime
+    import webrtcvad
+    WEBRTCVAD_AVAILABLE = True
 except ImportError:
-    torch = None
-    onnxruntime = None
-
-# silero-vadのインポート
-load_silero_vad = None
-get_speech_timestamps = None
-
-try:
-    from silero_vad import load_silero_vad, get_speech_timestamps
-except ImportError:
-    pass
+    WEBRTCVAD_AVAILABLE = False
+    webrtcvad = None
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +19,7 @@ logger = logging.getLogger(__name__)
 class VADDetector:
     """音声活動検出（VAD）クラス
     
-    silero-vadを使用してリアルタイムで音声の開始/終了を検出します。
+    webrtcvadを使用してリアルタイムで音声の開始/終了を検出します。
     """
     
     def __init__(
@@ -42,8 +34,8 @@ class VADDetector:
         """VAD検出器を初期化
         
         Args:
-            sample_rate: サンプリングレート（Hz）
-            threshold: 音声検出の閾値（0.0-1.0）
+            sample_rate: サンプリングレート（Hz）。8000, 16000, 32000, 48000をサポート
+            threshold: 音声検出の閾値（0.0-1.0）。webrtcvadのaggressiveness（0-3）に変換
             min_speech_duration_ms: 最小音声継続時間（ミリ秒）
             min_silence_duration_ms: 最小無音継続時間（ミリ秒）
             on_speech_start: 音声開始時のコールバック
@@ -61,33 +53,45 @@ class VADDetector:
         self.speech_start_time: Optional[float] = None
         self.silence_start_time: Optional[float] = None
         
-        # VADモデルの初期化
-        self.model = None
+        # webrtcvadの初期化
+        self.vad = None
+        # webrtcvadは10ms、20ms、30msのフレーム長のみをサポート
+        # 20msフレームを使用（10msより安定性が高い）
+        self.frame_duration_ms = 20  # 20msフレーム
+        self.frame_size = int(sample_rate * self.frame_duration_ms / 1000)  # サンプル数
         self._init_model()
-        
+    
     def _init_model(self):
         """VADモデルを初期化"""
         try:
-            if load_silero_vad is None or get_speech_timestamps is None:
-                logger.warning("[VADDetector] silero-vad not available. Using fallback VAD.")
-                self.model = None
-                self.get_speech_timestamps = None
+            if not WEBRTCVAD_AVAILABLE or webrtcvad is None:
+                logger.warning("[VADDetector] webrtcvad not available. Using fallback VAD.")
+                self.vad = None
                 return
             
-            # silero-vadモデルをロード
+            # webrtcvadを初期化
+            # aggressiveness: 0=最も敏感、3=最も厳格
+            # threshold (0.0-1.0) を 0-3 にマッピング
+            aggressiveness = int(self.threshold * 3)
+            aggressiveness = max(0, min(3, aggressiveness))  # 0-3の範囲に制限
+            
             try:
-                self.model = load_silero_vad(onnx=False)
-                self.get_speech_timestamps = get_speech_timestamps
-                logger.info("[VADDetector] silero-vad model loaded successfully")
+                self.vad = webrtcvad.Vad(aggressiveness)
+                
+                # サンプルレートの検証
+                if self.sample_rate not in [8000, 16000, 32000, 48000]:
+                    logger.warning(f"[VADDetector] Unsupported sample rate: {self.sample_rate}. Using fallback VAD.")
+                    self.vad = None
+                    return
+                
+                logger.info(f"[VADDetector] webrtcvad initialized successfully (aggressiveness={aggressiveness}, sample_rate={self.sample_rate}Hz)")
             except Exception as e:
-                logger.warning(f"[VADDetector] Failed to load silero-vad model: {e}")
-                self.model = None
-                self.get_speech_timestamps = None
+                logger.warning(f"[VADDetector] Failed to initialize webrtcvad: {e}")
+                self.vad = None
                 
         except Exception as e:
             logger.error(f"[VADDetector] Failed to initialize VAD model: {e}", exc_info=True)
-            self.model = None
-            self.get_speech_timestamps = None
+            self.vad = None
     
     def process_audio_frame(self, audio_data: np.ndarray, timestamp: float) -> bool:
         """音声フレームを処理して音声活動を検出
@@ -99,32 +103,43 @@ class VADDetector:
         Returns:
             音声が検出された場合True
         """
-        if self.model is None or self.get_speech_timestamps is None:
+        if self.vad is None:
             # フォールバック: 簡易的な音量ベースの検出
             return self._fallback_detection(audio_data, timestamp)
         
         try:
-            # 音声データを正規化（-1.0 ～ 1.0）
-            if audio_data.dtype == np.int16:
-                audio_normalized = audio_data.astype(np.float32) / 32768.0
-            else:
-                audio_normalized = audio_data.astype(np.float32)
+            # webrtcvadは10ms、20ms、30msのフレームサイズをサポート
+            # 入力データを適切なサイズに分割して処理
+            has_speech = False
             
-            # VADモデルで検出
-            # silero-vadは通常、長い音声チャンクを処理するため、
-            # 短いフレームの場合はバッファリングが必要
-            # ここでは簡易的にフレームごとに処理
-            speech_timestamps = self.get_speech_timestamps(
-                audio_normalized,
-                self.model,
-                sampling_rate=self.sample_rate,
-                threshold=self.threshold,
-                min_speech_duration_ms=self.min_speech_duration_ms,
-                min_silence_duration_ms=self.min_silence_duration_ms
-            )
+            # フレームサイズに合わせてデータを分割
+            num_frames = len(audio_data) // self.frame_size
+            if num_frames == 0:
+                # フレームサイズ未満の場合は、パディングまたはスキップ
+                return False
             
-            # 音声が検出されたかチェック
-            has_speech = len(speech_timestamps) > 0
+            # 各フレームを処理
+            for i in range(num_frames):
+                start_idx = i * self.frame_size
+                end_idx = start_idx + self.frame_size
+                frame = audio_data[start_idx:end_idx]
+                
+                # int16のバイト列に変換（webrtcvadの要件）
+                if frame.dtype != np.int16:
+                    frame = frame.astype(np.int16)
+                
+                frame_bytes = frame.tobytes()
+                
+                # webrtcvadで検出
+                try:
+                    frame_has_speech = self.vad.is_speech(frame_bytes, self.sample_rate)
+                    if frame_has_speech:
+                        has_speech = True
+                        break  # 1フレームでも音声が検出されればTrue
+                except Exception as e:
+                    logger.warning(f"[VADDetector] Error in webrtcvad.is_speech: {e}")
+                    # エラーが発生した場合はフォールバック
+                    return self._fallback_detection(audio_data, timestamp)
             
             # 状態遷移の処理
             if has_speech and not self.is_speaking:
