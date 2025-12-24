@@ -9,4 +9,6 @@ torch>=2.0.0
 onnxruntime>=1.16.0
 sounddevice>=0.4.6
 soundfile>=0.12.1
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
 

@@ -1,0 +1,15 @@
+# IVE Test Scenario
+# シンプルな対話シナリオのサンプル
+# 現時点ではTTS/STTがないため、音声ファイルパスとVAD検出のみ
+
+#me tests/hello.wav
+#bot [speechStart]
+#bot [speechEnd]
+
+#me tests/hello.wav
+#bot [speechStart]
+#bot [speechEnd]
+
+#me tests/hello.wav
+#bot [speechStart]
+#bot [speechEnd]

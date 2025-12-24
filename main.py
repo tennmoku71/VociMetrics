@@ -3,11 +3,13 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from tester.orchestrator import Orchestrator
-from tester.webrtc_client import WebRTCClient
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaPlayer
 
 
 def setup_logging(test_id: str, logs_dir: str = "logs"):
@@ -55,7 +57,7 @@ def load_config(config_path: str = "config.json") -> dict:
 
 
 async def main():
-    """メイン実行関数"""
+    """WebRTCクライアントとして動作（評価ツール）"""
     try:
         # 設定ファイルを読み込み
         config = load_config()
@@ -67,14 +69,19 @@ async def main():
         log_filename = setup_logging(test_id, logs_dir="logs")
         
         logger.info("=" * 60)
-        logger.info(f"Interactive Voice Evaluator (IVE) - Test: {test_id}")
+        logger.info(f"Interactive Voice Evaluator (IVE) - WebRTC Client")
+        logger.info(f"Test ID: {test_id}")
         logger.info(f"Log file: {log_filename}")
         logger.info("=" * 60)
-        logger.info("Loading configuration...")
-        logger.info("Configuration loaded successfully")
+        
+        # オーケストレーターを初期化
+        orchestrator = Orchestrator(config)
+        
+        # テストを開始（ロガーを初期化）
+        await orchestrator.run_test(test_id, test_type="rule")
         
         # 音声ファイルのパスを取得（コマンドライン引数またはデフォルト）
-        audio_file = sys.argv[1] if len(sys.argv) > 1 else "tests/hello.mp3"
+        audio_file = sys.argv[1] if len(sys.argv) > 1 else "tests/hello.wav"
         audio_path = Path(audio_file)
         
         if not audio_path.exists():
@@ -84,46 +91,59 @@ async def main():
         else:
             logger.info(f"Using audio file: {audio_file}")
         
-        # オーケストレーターを初期化
-        orchestrator = Orchestrator(config)
+        # WebRTCクライアントを起動
+        pc = RTCPeerConnection()
         
-        logger.info(f"Starting test: {test_id}")
-        logger.info("Make sure the WebRTC server is running: python tests/webrtc_server.py")
+        # 先にOfferを待つ（サーバーが作成する）
+        logger.info("offer.json を待機中...")
+        while not os.path.exists("offer.json"):
+            await asyncio.sleep(0.5)
         
-        # テストを開始（ロガーを初期化）
-        await orchestrator.run_test(test_id, test_type="rule")
+        with open("offer.json", "r") as f:
+            offer_data = json.load(f)
+            await pc.setRemoteDescription(RTCSessionDescription(**offer_data))
+        logger.info("offer.json を受信しました。")
+
+        # Offerを受け取った後に、送信したいファイルをトラックに追加
+        if audio_file and os.path.exists(audio_file):
+            player = MediaPlayer(audio_file)
+            pc.addTrack(player.audio)
+            logger.info(f"{audio_file} をセットアップしました。")
+        else:
+            logger.warning("音声ファイルが見つかりません。")
+            return
+
+        # Answerを作成
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
         
-        # WebRTCクライアントを初期化（ロガーを渡す）
-        webrtc_config = config.get("webrtc", {})
-        webrtc_client = WebRTCClient(
-            webrtc_config,
-            logger_instance=orchestrator.logger,
-            server_url="http://localhost:8080"
-        )
+        with open("answer.json", "w") as f:
+            json.dump({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}, f)
+        logger.info("answer.json を作成しました。")
+
+        # 音声ファイルの長さ分待機
+        if audio_file:
+            try:
+                import soundfile as sf
+                audio_data, sample_rate = sf.read(audio_file)
+                duration = len(audio_data) / sample_rate
+                logger.info(f"音声ファイルの長さ: {duration:.2f}秒、送信完了を待機中...")
+                await asyncio.sleep(duration + 1.0)  # 送信完了を待つ（少し余裕を持たせる）
+            except Exception as e:
+                logger.warning(f"音声ファイルの長さを取得できませんでした: {e}")
+                await asyncio.sleep(12)  # デフォルトで12秒待機
+        else:
+            await asyncio.sleep(12)
         
-        # WebRTC接続を確立（音声ファイルを送信）
-        await webrtc_client.connect(audio_file_path=str(audio_path) if audio_file else None)
-        
-        # 接続が確立されるまで待機
-        try:
-            await webrtc_client.wait_for_connection(timeout=10.0)
-        except TimeoutError:
-            logger.warning("Connection timeout, but continuing...")
-        
-        # サーバーからの音声ストリームを10秒間待機
-        logger.info("Waiting for 10-second audio stream from server...")
-        await asyncio.sleep(12)  # 10秒のストリーム + バッファ
-        
-        # 接続を閉じる
-        await webrtc_client.close()
+        logger.info("接続を閉じます...")
+        await pc.close()
         
         # タイムラインを保存
         timeline_path = orchestrator.logger.save_timeline()
         
         logger.info("=" * 60)
-        logger.info("Test completed successfully!")
+        logger.info("Client completed successfully!")
         logger.info(f"Timeline saved to: {timeline_path}")
-        logger.info(f"Received audio saved to: data/reports/received_audio.wav")
         logger.info(f"Log file: {log_filename}")
         logger.info("=" * 60)
         
