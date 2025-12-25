@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tester.orchestrator import Orchestrator
 from tester.vad_detector import VADDetector
+from evaluator.evaluator import Evaluator
 import numpy as np
 import soundfile as sf
 import aiohttp
@@ -84,6 +85,9 @@ async def main():
         # テストを開始（ロガーを初期化）
         await orchestrator.run_test(test_id, test_type="rule")
         
+        # 評価エンジンを初期化
+        evaluator = Evaluator(config)
+        
         # VAD検出器を初期化（サーバーからの音声を検出）
         websocket_config = config.get("websocket", {})
         input_sample_rate = websocket_config.get("sample_rate", 24000)  # WebSocketで受信する音声のサンプルレート
@@ -108,12 +112,50 @@ async def main():
         ws_connection = None
         vad_detector = None
         
+        # クライアント側VAD検知時間分析用のタイムスタンプ（現在のイベント用）
+        client_vad_timestamps = {
+            "first_audio_received": None,  # 最初の音声データを受信した時刻
+            "first_frame_processed": None,  # 最初のVADフレームを処理した時刻
+            "speech_start_detected": None,  # VADが音声開始を検出した時刻
+            "event_logged": None,  # BOT_SPEECH_STARTイベントを記録した時刻
+        }
+        
+        # クライアント側VAD検知時間分析用の履歴（各BOT_SPEECH_STARTイベントごとに保存）
+        client_vad_history = []
+        
         # 音声開始/終了のコールバック（orchestratorにイベントを通知）
         def on_bot_speech_start(timestamp: float):
             """ボット（サーバー）の音声開始を記録"""
+            nonlocal client_vad_timestamps, client_vad_history
+            current_time = asyncio.get_event_loop().time()
+            
+            # 音声開始検出時刻を記録
+            if client_vad_timestamps.get("speech_start_detected") is None:
+                client_vad_timestamps["speech_start_detected"] = current_time
+            
             logger.info(f"[VAD] Bot speech started at {timestamp:.3f}s")
             orchestrator.logger.log_bot_speech_start()
             orchestrator.notify_event("BOT_SPEECH_START")
+            
+            # イベント記録時刻を記録
+            client_vad_timestamps["event_logged"] = current_time
+            
+            # 現在のタイムスタンプを履歴に保存（コピーして保存）
+            history_entry = {
+                "first_audio_received": client_vad_timestamps.get("first_audio_received"),
+                "first_frame_processed": client_vad_timestamps.get("first_frame_processed"),
+                "speech_start_detected": client_vad_timestamps.get("speech_start_detected"),
+                "event_logged": client_vad_timestamps.get("event_logged"),
+            }
+            client_vad_history.append(history_entry)
+            
+            # タイムスタンプをリセット（次の検出に備える）
+            client_vad_timestamps = {
+                "first_audio_received": None,
+                "first_frame_processed": None,
+                "speech_start_detected": None,
+                "event_logged": None,
+            }
         
         def on_bot_speech_end(timestamp: float):
             """ボット（サーバー）の音声終了を記録"""
@@ -143,6 +185,7 @@ async def main():
                 # サーバーからの音声を受信してVADで処理するタスク
                 async def receive_audio():
                     """サーバーからの音声を受信してVADで処理"""
+                    nonlocal client_vad_timestamps
                     # orchestratorのstart_timeと統一
                     start_time = orchestrator.logger.start_time
                     # VAD用のバッファ（リサンプリング用）
@@ -165,6 +208,10 @@ async def main():
                                 # バイナリメッセージ（音声データ）
                                 # PCM形式（int16）を想定
                                 audio_chunk = np.frombuffer(msg.data, dtype=np.int16)
+                                
+                                # 最初の音声データ受信時刻を記録（最初のチャンクを受信した時点）
+                                if client_vad_timestamps["first_audio_received"] is None:
+                                    client_vad_timestamps["first_audio_received"] = asyncio.get_event_loop().time()
                                 
                                 # 受信した音声を記録（録音が有効な場合のみ）
                                 if recording_enabled:
@@ -198,8 +245,16 @@ async def main():
                                         chunk_start_samples_24k = total_samples_received - len(vad_buffer) + processed_samples_24k
                                         timestamp = chunk_start_samples_24k / input_sample_rate
                                         
+                                        # VADで処理（音声開始を検出する可能性があるフレーム）
+                                        is_speaking_before = vad_detector.is_speaking
+                                        
                                         # VADで処理
-                                        vad_detector.process_audio_frame(vad_chunk, timestamp)
+                                        has_speech = vad_detector.process_audio_frame(vad_chunk, timestamp)
+                                        
+                                        # 音声開始を検出したフレームの処理時刻を記録
+                                        if not is_speaking_before and vad_detector.is_speaking:
+                                            if client_vad_timestamps["first_frame_processed"] is None:
+                                                client_vad_timestamps["first_frame_processed"] = asyncio.get_event_loop().time()
                                         
                                         processed_samples += vad_chunk_size
                                     
@@ -215,8 +270,16 @@ async def main():
                                         chunk_start_samples_24k = total_samples_received - len(vad_buffer)
                                         timestamp = chunk_start_samples_24k / input_sample_rate
                                         
+                                        # VADで処理（音声開始を検出する可能性があるフレーム）
+                                        is_speaking_before = vad_detector.is_speaking
+                                        
                                         # VADで処理
-                                        vad_detector.process_audio_frame(vad_chunk, timestamp)
+                                        has_speech = vad_detector.process_audio_frame(vad_chunk, timestamp)
+                                        
+                                        # 音声開始を検出したフレームの処理時刻を記録
+                                        if not is_speaking_before and vad_detector.is_speaking:
+                                            if client_vad_timestamps["first_frame_processed"] is None:
+                                                client_vad_timestamps["first_frame_processed"] = asyncio.get_event_loop().time()
                                 
                             elif msg.type == aiohttp.WSMsgType.TEXT:
                                 # テキストメッセージ（制御用）
@@ -401,6 +464,62 @@ async def main():
                         
                     except Exception as e:
                         logger.error(f"録音の保存エラー: {e}", exc_info=True)
+                
+                # 評価処理（STTと評価指標の計算）
+                if recorded_user_audio or recorded_bot_audio:
+                    try:
+                        user_audio = np.concatenate(recorded_user_audio) if recorded_user_audio else np.array([], dtype=np.int16)
+                        bot_audio = np.concatenate(recorded_bot_audio) if recorded_bot_audio else np.array([], dtype=np.int16)
+                        
+                        # STTで音声を認識
+                        stt_results = evaluator.evaluate_recording(
+                            user_audio=user_audio,
+                            bot_audio=bot_audio,
+                            sample_rate=input_sample_rate,
+                            logger_instance=orchestrator.logger
+                        )
+                        
+                        # 評価指標を計算
+                        metrics = evaluator.calculate_metrics(orchestrator.logger)
+                        
+                        logger.info("=" * 60)
+                        logger.info("評価結果:")
+                        logger.info(f"  Response Latency: {metrics.get('response_latency_ms')}ms (閾値: {config.get('evaluation', {}).get('response_latency_threshold_ms', 800)}ms) {'✓' if metrics.get('response_latency_ok') else '✗'}")
+                        logger.info(f"  Think Time: {metrics.get('think_time_ms')}ms (閾値: {config.get('evaluation', {}).get('think_time_threshold_ms', 500)}ms) {'✓' if metrics.get('think_time_ok') else '✗'}")
+                        logger.info(f"  User Speech Duration: {metrics.get('user_speech_duration_ms')}ms")
+                        logger.info(f"  Bot Speech Duration: {metrics.get('bot_speech_duration_ms')}ms")
+                        logger.info("=" * 60)
+                        
+                    except Exception as e:
+                        logger.error(f"評価処理エラー: {e}", exc_info=True)
+        
+        # 応答時間分析を出力（タイムラインから計算）
+        events = orchestrator.logger.events
+        user_speech_ends = [e for e in events if e.get("type") == "USER_SPEECH_END"]
+        bot_speech_starts = [e for e in events if e.get("type") == "BOT_SPEECH_START"]
+        
+        if user_speech_ends and bot_speech_starts:
+            # 各USER_SPEECH_ENDに対応するBOT_SPEECH_STARTを探して応答時間を計算
+            response_latencies = []
+            bot_idx = 0
+            for user_end in user_speech_ends:
+                user_end_time = user_end.get("time", 0)
+                
+                # 対応するBOT_SPEECH_STARTを探す（USER_SPEECH_ENDの後に最初に来るもの）
+                for j in range(bot_idx, len(bot_speech_starts)):
+                    if bot_speech_starts[j].get("time", 0) > user_end_time:
+                        bot_start_time = bot_speech_starts[j].get("time", 0)
+                        response_latency = bot_start_time - user_end_time
+                        response_latencies.append(response_latency)
+                        bot_idx = j + 1
+                        break
+            
+            if response_latencies:
+                avg_response_latency = sum(response_latencies) / len(response_latencies)
+                logger.info("=" * 60)
+                logger.info("応答時間分析（Response Latency）:")
+                logger.info(f"  平均応答時間: {avg_response_latency:.2f}ms (サンプル数: {len(response_latencies)})")
+                logger.info("=" * 60)
         
         # タイムラインを保存
         timeline_path = orchestrator.logger.save_timeline()

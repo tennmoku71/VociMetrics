@@ -10,4 +10,7 @@ sounddevice>=0.4.6
 soundfile>=0.12.1
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+SpeechRecognition>=3.10.0
+gtts>=2.5.0  # Google Text-to-Speech（日本語対応TTS）
+# vosk>=0.3.45  # オプション: オフラインSTTが必要な場合のみインストール
 
