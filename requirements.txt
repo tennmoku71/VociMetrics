@@ -15,5 +15,6 @@ gtts>=2.5.0  # Google Text-to-Speech（日本語対応TTS）
 pydub>=0.25.1  # 音声ファイル変換用（MP3→WAV）
 tqdm>=4.66.0  # プログレスバー表示
 python-Levenshtein>=0.21.0  # 編集距離計算（テキスト比較用）
+openai>=1.0.0  # OpenAI API（LLMベースのテキスト比較用）
 # vosk>=0.3.45  # オプション: オフラインSTTが必要な場合のみインストール
 

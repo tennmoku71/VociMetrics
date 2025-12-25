@@ -20,6 +20,10 @@ import soundfile as sf
 import aiohttp
 import tempfile
 import hashlib
+from dotenv import load_dotenv
+
+# .envファイルを読み込む
+load_dotenv()
 
 
 def setup_logging(test_id: str, logs_dir: str = "logs"):
