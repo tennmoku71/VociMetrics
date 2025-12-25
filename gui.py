@@ -300,7 +300,7 @@ def edit_config(config: Dict[str, Any], options: Dict[str, Any]) -> Dict[str, An
                 tts_config["sample_rate"] = tts_options["sample_rate"].get("default", 24000)
     
     # 評価設定
-    with st.expander("Evaluation Settings", expanded=True):
+    with st.expander("Evaluation Settings", expanded=False):
         eval_config = edited_config.setdefault("evaluation", {})
         eval_options = options.get("evaluation", {})
         
@@ -786,11 +786,60 @@ def display_results(results: Dict[str, Any]):
     """結果を表示"""
     st.header("📊 Evaluation Results")
     
-    # スコア表示
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # スコアバーのスタイル
+    st.markdown("""
+    <style>
+    .score-bar-container {
+        margin: 0.2rem 0;
+        padding: 0.2rem;
+        width: 100%;
+        box-sizing: border-box;
+    }
+    .score-label {
+        font-weight: bold;
+        margin-bottom: 0.5rem;
+        font-size: 1rem;
+    }
+    .score-bar-wrapper {
+        background: #f0f0f0;
+        border-radius: 10px;
+        height: 30px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+        width: 100%;
+        box-sizing: border-box;
+    }
+    .score-bar-fill {
+        height: 100%;
+        border-radius: 10px;
+        transition: width 0.5s ease;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        padding-right: 10px;
+        color: white;
+        font-weight: bold;
+        font-size: 0.9rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .score-bar-fill.green {
+        background: linear-gradient(90deg, #4CAF50 0%, #45a049 100%);
+    }
+    .score-bar-fill.orange {
+        background: linear-gradient(90deg, #FF9800 0%, #F57C00 100%);
+    }
+    .score-bar-fill.red {
+        background: linear-gradient(90deg, #F44336 0%, #D32F2F 100%);
+    }
+    .score-bar-fill.gray {
+        background: linear-gradient(90deg, #9E9E9E 0%, #757575 100%);
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
-    def get_score_color(score: Optional[float]) -> str:
-        """スコアに応じた色を返す"""
+    def get_score_color_class(score: Optional[float]) -> str:
+        """スコアに応じた色クラスを返す"""
         if score is None:
             return "gray"
         if score >= 80.0:
@@ -800,50 +849,38 @@ def display_results(results: Dict[str, Any]):
         else:
             return "red"
     
-    with col1:
-        turntake_score = results.get("turntake", {}).get("score")
-        color = get_score_color(turntake_score)
-        st.metric(
-            "Turn-taking",
-            f"{turntake_score:.1f}/100" if turntake_score is not None else "N/A",
-            delta=None
-        )
+    # スコア表示（バー形式）
+    turntake_score = results.get("turntake", {}).get("score")
+    sound_score = results.get("sound", {}).get("score")
+    toolcall_score = results.get("toolcall", {}).get("score")
+    dialogue_score = results.get("dialogue", {}).get("score")
+    conv_quality_score = results.get("conversation_quality", {}).get("score")
     
-    with col2:
-        sound_score = results.get("sound", {}).get("score")
-        color = get_score_color(sound_score)
-        st.metric(
-            "Sound",
-            f"{sound_score:.1f}/100" if sound_score is not None else "N/A",
-            delta=None
-        )
+    scores = [
+        ("Turn-taking", turntake_score),
+        ("Sound", sound_score),
+        ("Toolcall", toolcall_score),
+        ("Dialogue", dialogue_score),
+        ("Conversation Quality", conv_quality_score)
+    ]
     
-    with col3:
-        toolcall_score = results.get("toolcall", {}).get("score")
-        color = get_score_color(toolcall_score)
-        st.metric(
-            "Toolcall",
-            f"{toolcall_score:.1f}/100" if toolcall_score is not None else "N/A",
-            delta=None
-        )
-    
-    with col4:
-        dialogue_score = results.get("dialogue", {}).get("score")
-        color = get_score_color(dialogue_score)
-        st.metric(
-            "Dialogue",
-            f"{dialogue_score:.1f}/100" if dialogue_score is not None else "N/A",
-            delta=None
-        )
-    
-    with col5:
-        conv_quality_score = results.get("conversation_quality", {}).get("score")
-        color = get_score_color(conv_quality_score)
-        st.metric(
-            "Conversation Quality",
-            f"{conv_quality_score:.1f}/100" if conv_quality_score is not None else "N/A",
-            delta=None
-        )
+    for label, score in scores:
+        color_class = get_score_color_class(score)
+        width = min(100, max(0, score)) if score is not None else 0  # 0-100の範囲に制限
+        score_text = f"{score:.1f}/100" if score is not None else "N/A"
+        
+        score_html = f"""
+        <div class="score-bar-container">
+            <div class="score-label">{label}</div>
+            <div class="score-bar-wrapper">
+                <div class="score-bar-fill {color_class}" style="width: {width}%; max-width: 100%;">
+                    {score_text if width > 15 else ""}
+                </div>
+            </div>
+            {"<div style='text-align: right; margin-top: 0.25rem; font-size: 0.9rem; color: #666;'>" + score_text + "</div>" if width <= 15 else ""}
+        </div>
+        """
+        st.markdown(score_html, unsafe_allow_html=True)
     
     # 詳細情報
     st.subheader("Details")
@@ -883,7 +920,19 @@ def display_results(results: Dict[str, Any]):
     if "log" in files:
         st.write(f"📝 Log: `{files['log']}`")
     if "recording" in files:
-        st.write(f"🎵 Recording: `{files['recording']}`")
+        recording_path = files['recording']
+        st.write(f"🎵 Recording: `{recording_path}`")
+        
+        # オーディオプレーヤーを表示
+        recording_file = Path(recording_path)
+        if recording_file.exists():
+            try:
+                        # オーディオファイルを読み込んでプレーヤーに表示
+                with open(recording_file, 'rb') as audio_file:
+                    audio_bytes = audio_file.read()
+                    st.audio(audio_bytes, format='audio/wav')
+            except Exception as e:
+                st.error(f"Could not load audio file: {e}")
 
 
 def main():
@@ -926,12 +975,24 @@ def main():
     # タイトル
     st.title("🎤 Interactive Voice Evaluator (IVE)")
     
+    # 左右のカラムにpaddingとmarginを設定
+    st.markdown("""
+    <style>
+    div[data-testid="column"] {
+        padding: 1.5rem;
+        margin: 0.5rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     # 左右に分割
     left_col, right_col = st.columns([1, 1])
     
     with left_col:
         # 設定画面（編集可能）
         edited_config = edit_config(st.session_state.config, st.session_state.config_options)
+        # 編集された設定をセッション状態に保存（右側のカラムで使用）
+        st.session_state.edited_config = edited_config
         
         st.divider()
         
@@ -976,13 +1037,44 @@ def main():
         # 内容が変更された場合はセッション状態を更新
         if edited_scenario_content != st.session_state.scenario_content:
             st.session_state.scenario_content = edited_scenario_content
+    
+    with right_col:
+        # 実行/停止ボタン（右側の一番上）
+        # ボタンのスタイルをカスタマイズ
+        st.markdown("""
+        <style>
+        div[data-testid="stButton"] > button[kind="primary"],
+        div[data-testid="stButton"] > button[kind="secondary"] {
+            height: 80px !important;
+            font-size: 1.5rem !important;
+            font-weight: bold !important;
+            padding: 1rem 2rem !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
         
-        # 実行ボタン（設定を保存してから実行）
-        run_button = st.button("▶️ Run Evaluation", type="primary", use_container_width=True, disabled=st.session_state.is_running)
-        if run_button and not st.session_state.is_running:
+        # 実行中かどうかでボタンのラベルと動作を切り替え
+        run_button = False
+        stop_button = False
+        
+        if st.session_state.is_running:
+            stop_button = st.button("🛑 Stop Evaluation", type="secondary", use_container_width=True)
+            if stop_button:
+                process = st.session_state.process
+                if process:
+                    process.terminate()
+                st.session_state.is_running = False
+                st.rerun()
+        else:
+            run_button = st.button("▶️ Run Evaluation", type="primary", use_container_width=True)
+        
+        # 実行ボタンが押された場合の処理
+        if run_button:
             if not st.session_state.scenario_file:
                 st.error("Please select a scenario file first.")
             else:
+                # 左側のカラムで編集された設定を取得（セッション状態から）
+                edited_config = st.session_state.get("edited_config", st.session_state.config)
                 # 編集された設定をconfig.jsonに保存してから実行
                 save_config(edited_config, use_temp=False)
                 st.session_state.config = edited_config
@@ -1004,33 +1096,9 @@ def main():
                     print(f"[ERROR] Failed to start evaluation: {e}")
                     print(traceback.format_exc())
                     st.session_state.is_running = False
-    
-    with right_col:
-        st.header("📊 Results")
-        
-        # デバッグ情報（一時的）
-        if st.checkbox("Show debug info", key="show_debug"):
-            st.write(f"is_running: {st.session_state.is_running}")
-            st.write(f"process: {st.session_state.process}")
-            if st.session_state.process:
-                st.write(f"process.poll(): {st.session_state.process.poll()}")
-                st.write(f"process.returncode: {st.session_state.process.returncode}")
-            st.write(f"output_queue: {st.session_state.output_queue}")
-            st.write(f"scenario_file: {st.session_state.scenario_file}")
-            output_lines = st.session_state.get("output_lines", [])
-            st.write(f"output_lines count: {len(output_lines)}")
-            if output_lines:
-                st.write("Last 10 output lines:")
-                for line in output_lines[-10:]:
-                    st.text(line)
         
         if st.session_state.is_running:
-            # 実行中
-            st.info("🔄 Evaluation is running...")
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            log_output = st.empty()
-            
+            # 実行中 - リッチなプログレス表示
             process = st.session_state.process
             output_queue = st.session_state.output_queue
             
@@ -1073,66 +1141,320 @@ def main():
                         st.session_state.is_running = False
                         st.rerun()
                 else:
-                    # プロセスが実行中
+                    # プロセスが実行中 - リッチなプログレス表示
                     output_lines = st.session_state.get("output_lines", [])
                     progress_value = st.session_state.get("progress_value", 0)
                     current_action = st.session_state.get("current_action", "")
                     
-                    # 出力を読み取り
+                    # 出力を読み取り（ログは保存せず、プログレス情報のみ抽出）
                     try:
                         line = output_queue.get(timeout=0.1)
                         if line is not None:  # 終了マーカーでない場合
-                            output_lines.append(line)
-                            st.session_state.output_lines = output_lines
-                            
                             # プログレス情報を抽出
                             parsed = parse_output_line(line)
                             if parsed:
                                 if parsed["type"] == "progress":
                                     progress_value = parsed["value"]
                                     st.session_state.progress_value = progress_value
-                                    progress_bar.progress(progress_value / 100.0)
                                 elif parsed["type"] == "action":
                                     current_action = parsed["value"]
                                     st.session_state.current_action = current_action
-                                    status_text.text(f"Current: {current_action}")
-                            
-                            # ログ出力を更新（最新20行）
-                            log_output.text_area(
-                                "Output",
-                                "\n".join(output_lines[-20:]),
-                                height=400,
-                                disabled=True
-                            )
+                            # 結果パース用に重要な行のみ保存（スコアやファイルパスなど）
+                            if any(keyword in line for keyword in ["Score:", "Timeline saved to:", "Log file:", "Recording file:"]):
+                                output_lines.append(line)
+                                st.session_state.output_lines = output_lines
                     except queue.Empty:
-                        # プロセスが終了したか確認
-                        if process.poll() is not None:
-                            # 残りの出力を読み取る
-                            remaining_lines = []
-                            while True:
-                                try:
-                                    line = output_queue.get(timeout=0.1)
-                                    if line is None:
-                                        break
-                                    remaining_lines.append(line)
-                                except queue.Empty:
-                                    break
-                            output_lines.extend(remaining_lines)
-                            st.session_state.output_lines = output_lines
-                            
-                            # プロセスが正常終了したか確認
-                            if process.returncode != 0:
-                                print(f"[ERROR] Evaluation failed with return code {process.returncode}")
-                                if output_lines:
-                                    print("[ERROR] Output:")
-                                    for line in output_lines:
-                                        print(f"  {line}")
-                                st.session_state.is_running = False
-                            else:
-                                # 結果をパース
-                                st.session_state.results = parse_results(output_lines)
-                                st.session_state.is_running = False
-                                st.rerun()
+                        pass
+                    
+                    # リッチなプログレス表示 - HTML/CSSアニメーション
+                    # CSSスタイルを先に適用
+                    st.markdown("""
+                    <style>
+                    @keyframes spin {
+                        0% { transform: rotate(0deg); }
+                        100% { transform: rotate(360deg); }
+                    }
+                    @keyframes pulse {
+                        0%, 100% { transform: scale(1); opacity: 1; }
+                        50% { transform: scale(1.1); opacity: 0.8; }
+                    }
+                    @keyframes wave {
+                        0%, 100% { height: 30px; }
+                        50% { height: 100px; }
+                    }
+                    @keyframes float {
+                        0%, 100% { transform: translateY(0px); }
+                        50% { transform: translateY(-10px); }
+                    }
+                    @keyframes gradient {
+                        0% { background-position: 0% 50%; }
+                        50% { background-position: 100% 50%; }
+                        100% { background-position: 0% 50%; }
+                    }
+                    @keyframes shimmer {
+                        0% { background-position: -1000px 0; }
+                        100% { background-position: 1000px 0; }
+                    }
+                    @keyframes bounce {
+                        0%, 100% { transform: translateY(0); }
+                        25% { transform: translateY(-15px); }
+                        50% { transform: translateY(0); }
+                        75% { transform: translateY(-8px); }
+                    }
+                    
+                    @keyframes bounce-circle {
+                        0% { 
+                            transform: translateY(0) scale(1);
+                        }
+                        20% { 
+                            transform: translateY(-40px) scale(1.2);
+                        }
+                        40% { 
+                            transform: translateY(0) scale(1);
+                        }
+                        60% { 
+                            transform: translateY(-20px) scale(1.1);
+                        }
+                        80% { 
+                            transform: translateY(0) scale(1);
+                        }
+                        100% { 
+                            transform: translateY(0) scale(1);
+                        }
+                    }
+                    
+                    @keyframes bounce-circle-delayed {
+                        0% { 
+                            transform: translateY(0) scale(1);
+                        }
+                        20% { 
+                            transform: translateY(-35px) scale(1.15);
+                        }
+                        40% { 
+                            transform: translateY(0) scale(1);
+                        }
+                        60% { 
+                            transform: translateY(-18px) scale(1.08);
+                        }
+                        80% { 
+                            transform: translateY(0) scale(1);
+                        }
+                        100% { 
+                            transform: translateY(0) scale(1);
+                        }
+                    }
+                    
+                    .progress-container {
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        background-size: 200% 200%;
+                        animation: gradient 5s ease infinite;
+                        padding: 2rem;
+                        border-radius: 20px;
+                        box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+                        margin: 1.5rem auto;
+                        max-width: 600px;
+                        position: relative;
+                        overflow: hidden;
+                    }
+                    
+                    .progress-container::before {
+                        content: '';
+                        position: absolute;
+                        top: -50%;
+                        left: -50%;
+                        width: 200%;
+                        height: 200%;
+                        background: radial-gradient(circle, rgba(255,255,255,0.1) 1px, transparent 1px);
+                        background-size: 30px 30px;
+                        animation: spin 20s linear infinite;
+                    }
+                    
+                    .progress-header {
+                        color: white;
+                        font-size: 1.8rem;
+                        font-weight: bold;
+                        margin-bottom: 1.5rem;
+                        text-align: center;
+                        position: relative;
+                        z-index: 1;
+                        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                    }
+                    
+                    .spinning-icon {
+                        display: inline-block;
+                        animation: spin 2s linear infinite, pulse 2s ease-in-out infinite;
+                        font-size: 2.5em;
+                        margin-right: 0.5rem;
+                    }
+                    
+                    .wave-container {
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        gap: 6px;
+                        height: 120px;
+                        margin: 2rem 0;
+                        position: relative;
+                        z-index: 1;
+                    }
+                    
+                    .wave-bar {
+                        width: 6px;
+                        background: rgba(255,255,255,0.9);
+                        border-radius: 3px;
+                        animation: wave 1.2s ease-in-out infinite;
+                        box-shadow: 0 0 10px rgba(255,255,255,0.5);
+                    }
+                    
+                    .wave-bar:nth-child(1) { animation-delay: 0s; }
+                    .wave-bar:nth-child(2) { animation-delay: 0.1s; }
+                    .wave-bar:nth-child(3) { animation-delay: 0.2s; }
+                    .wave-bar:nth-child(4) { animation-delay: 0.3s; }
+                    .wave-bar:nth-child(5) { animation-delay: 0.4s; }
+                    .wave-bar:nth-child(6) { animation-delay: 0.5s; }
+                    .wave-bar:nth-child(7) { animation-delay: 0.6s; }
+                    .wave-bar:nth-child(8) { animation-delay: 0.7s; }
+                    .wave-bar:nth-child(9) { animation-delay: 0.8s; }
+                    .wave-bar:nth-child(10) { animation-delay: 0.9s; }
+                    
+                    .progress-bar-container {
+                        background: rgba(255,255,255,0.25);
+                        border-radius: 15px;
+                        padding: 0.8rem;
+                        margin: 1.5rem 0;
+                        position: relative;
+                        z-index: 1;
+                        backdrop-filter: blur(10px);
+                    }
+                    
+                    .progress-bar-fill {
+                        background: #00f260;
+                        height: 35px;
+                        border-radius: 12px;
+                        transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        color: white;
+                        font-weight: bold;
+                        font-size: 1rem;
+                        box-shadow: 0 4px 15px rgba(0,242,96,0.4);
+                    }
+                    
+                    .status-text {
+                        color: white;
+                        font-size: 1.2rem;
+                        margin-top: 1.5rem;
+                        text-align: center;
+                        font-weight: 500;
+                        position: relative;
+                        z-index: 1;
+                        text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+                        animation: float 3s ease-in-out infinite;
+                    }
+                    
+                    .dots-container {
+                        display: inline-flex;
+                        gap: 8px;
+                        margin-left: 10px;
+                    }
+                    
+                    .dot {
+                        width: 8px;
+                        height: 8px;
+                        background: white;
+                        border-radius: 50%;
+                        animation: bounce 1.4s ease-in-out infinite;
+                    }
+                    
+                    .dot:nth-child(1) { animation-delay: 0s; }
+                    .dot:nth-child(2) { animation-delay: 0.2s; }
+                    .dot:nth-child(3) { animation-delay: 0.4s; }
+                    
+                    .bouncing-circles {
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        gap: 20px;
+                        margin: 2rem 0;
+                        position: relative;
+                        z-index: 1;
+                    }
+                    
+                    .bouncing-circle {
+                        width: 60px;
+                        height: 60px;
+                        border-radius: 50%;
+                        background: radial-gradient(circle at 30% 30%, rgba(255,255,255,1) 0%, rgba(255,255,255,0.7) 50%, rgba(255,255,255,0.4) 100%);
+                        box-shadow: 0 8px 25px rgba(255,255,255,0.6),
+                                    0 0 40px rgba(255,255,255,0.4),
+                                    inset 0 3px 8px rgba(255,255,255,0.9),
+                                    inset 0 -3px 8px rgba(0,0,0,0.2);
+                        animation: bounce-circle 1.2s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+                        position: relative;
+                        will-change: transform;
+                    }
+                    
+                    .bouncing-circle::before {
+                        content: '';
+                        position: absolute;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 50%;
+                        background: radial-gradient(circle, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0.2) 100%);
+                    }
+                    
+                    .bouncing-circle:nth-child(1) { 
+                        animation: bounce-circle 1.2s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+                        animation-delay: 0s;
+                    }
+                    .bouncing-circle:nth-child(2) { 
+                        animation: bounce-circle-delayed 1.2s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+                        animation-delay: 0.2s;
+                    }
+                    .bouncing-circle:nth-child(3) { 
+                        animation: bounce-circle 1.2s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+                        animation-delay: 0.4s;
+                    }
+                    .bouncing-circle:nth-child(4) { 
+                        animation: bounce-circle-delayed 1.2s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+                        animation-delay: 0.6s;
+                    }
+                    .bouncing-circle:nth-child(5) { 
+                        animation: bounce-circle 1.2s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+                        animation-delay: 0.8s;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    # プログレスコンテナ
+                    progress_width = max(5, progress_value)
+                    
+                    # HTMLを1行にまとめて、st.markdownで表示（音波バーのみ）
+                    progress_html = (
+                        '<div class="progress-container">'
+                        '<div class="progress-header">Evaluation in Progress</div>'
+                        '<div class="wave-container">'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '<div class="wave-bar"></div>'
+                        '</div>'
+                        f'<div class="progress-bar-container">'
+                        f'<div class="progress-bar-fill" style="width: {progress_width}%;">{progress_value}%</div>'
+                        '</div>'
+                        '</div>'
+                    )
+                    st.markdown(progress_html, unsafe_allow_html=True)
                 
                     # 自動更新のため再実行（プロセスが実行中の場合のみ）
                     if process.poll() is None:  # プロセスがまだ実行中
@@ -1154,8 +1476,8 @@ def main():
                 st.session_state.current_action = ""
                 st.rerun()
         else:
-            # 待機中
-            st.info("Configure settings and click 'Run Evaluation' to start.")
+            # 待機中（何も表示しない）
+            pass
 
 
 if __name__ == "__main__":

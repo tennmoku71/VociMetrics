@@ -83,6 +83,10 @@ async def websocket_handler(request):
         while valid_loop:
             nonlocal response_audio_chunks, should_send_response
             
+            # 接続が閉じられている場合はループを終了
+            if ws.closed:
+                break
+            
             # 応答音声を送信する必要がある場合
             if should_send_response and response_audio_chunks is None:
                 # 応答音声ファイルを読み込む
@@ -144,19 +148,29 @@ async def websocket_handler(request):
                     should_send_response = False  # フラグをリセット
             
             # 応答音声チャンクがある場合は音声を送信、ない場合は無音を送信
-            if response_audio_chunks and len(response_audio_chunks) > 0:
-                # 音声チャンクを送信
-                chunk = response_audio_chunks.pop(0)
-                await ws.send_bytes(chunk.tobytes())
-                if len(response_audio_chunks) == 0:
-                    # すべての音声チャンクを送信完了
-                    current_time = asyncio.get_event_loop().time()
-                    relative_time = current_time - start_time
-                    print(f"[応答] 音声送信終了: {relative_time:.3f}s")
-                    response_audio_chunks = None
-            else:
-                # 無音を送信（デフォルト）
-                await ws.send_bytes(silence_chunk.tobytes())
+            try:
+                if response_audio_chunks and len(response_audio_chunks) > 0:
+                    # 音声チャンクを送信
+                    chunk = response_audio_chunks.pop(0)
+                    if not ws.closed:
+                        await ws.send_bytes(chunk.tobytes())
+                    if len(response_audio_chunks) == 0:
+                        # すべての音声チャンクを送信完了
+                        current_time = asyncio.get_event_loop().time()
+                        relative_time = current_time - start_time
+                        print(f"[応答] 音声送信終了: {relative_time:.3f}s")
+                        response_audio_chunks = None
+                else:
+                    # 無音を送信（デフォルト）
+                    if not ws.closed:
+                        await ws.send_bytes(silence_chunk.tobytes())
+            except (ConnectionError, BrokenPipeError, OSError) as e:
+                # 接続が切断された場合はループを終了
+                print(f"[INFO] 接続が切断されました（音声送信タスク）: {e}")
+                break
+            except Exception as e:
+                # その他のエラーはログに記録して続行
+                print(f"[WARNING] 音声送信エラー: {e}")
             
             await asyncio.sleep(chunk_duration)  # 10ms待機
     
@@ -307,8 +321,16 @@ async def websocket_handler(request):
                 print("WebSocket接続が閉じられました")
                 break
                 
+    except (ConnectionError, BrokenPipeError, OSError) as e:
+        # 接続が切断された場合のエラー（正常な切断も含む）
+        if not ws.closed:
+            print(f"WebSocket接続が切断されました: {e}")
+        else:
+            print("WebSocket接続が正常に閉じられました")
     except Exception as e:
         print(f"WebSocket接続エラー: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         # ループフラグを無効化
         valid_loop = False
