@@ -89,17 +89,39 @@ async def main():
         input_sample_rate = websocket_config.get("sample_rate", 24000)  # WebSocketで受信する音声のサンプルレート
         vad_sample_rate = 16000  # webrtcvadが期待するサンプルレート
         
-        # 音声開始/終了のコールバック
+        # .convoファイルのパスを取得（コマンドライン引数またはデフォルト）
+        convo_file = sys.argv[1] if len(sys.argv) > 1 else "data/scenarios/sample.convo"
+        convo_path = Path(convo_file)
+        
+        if not convo_path.exists():
+            # scenarios_dirからの相対パスを試す
+            scenarios_dir = config.get("scenarios_dir", "data/scenarios")
+            convo_path = Path(scenarios_dir) / convo_file
+            if not convo_path.exists():
+                logger.error(f"Convo file not found: {convo_file}")
+                logger.info("Please specify a valid .convo file path")
+                sys.exit(1)
+        
+        logger.info(f"Using convo file: {convo_path}")
+        
+        # WebSocket接続とVAD検出器を初期化（シナリオ実行中に使用）
+        ws_connection = None
+        vad_detector = None
+        
+        # 音声開始/終了のコールバック（orchestratorにイベントを通知）
         def on_bot_speech_start(timestamp: float):
             """ボット（サーバー）の音声開始を記録"""
             logger.info(f"[VAD] Bot speech started at {timestamp:.3f}s")
             orchestrator.logger.log_bot_speech_start()
+            orchestrator.notify_event("BOT_SPEECH_START")
         
         def on_bot_speech_end(timestamp: float):
             """ボット（サーバー）の音声終了を記録"""
             logger.info(f"[VAD] Bot speech ended at {timestamp:.3f}s")
             orchestrator.logger.log_bot_speech_end()
+            orchestrator.notify_event("BOT_SPEECH_END")
         
+        # VAD検出器を初期化
         vad_detector = VADDetector(
             sample_rate=vad_sample_rate,  # 16000Hzで初期化
             threshold=0.5,
@@ -109,17 +131,6 @@ async def main():
             on_speech_end=on_bot_speech_end
         )
         
-        # 音声ファイルのパスを取得（コマンドライン引数またはデフォルト）
-        audio_file = sys.argv[1] if len(sys.argv) > 1 else "tests/hello.wav"
-        audio_path = Path(audio_file)
-        
-        if not audio_path.exists():
-            logger.warning(f"Audio file not found: {audio_file}")
-            logger.info("Continuing without audio file...")
-            audio_file = None
-        else:
-            logger.info(f"Using audio file: {audio_file}")
-        
         # WebSocketサーバーに接続
         server_url = websocket_config.get("server_url", "ws://localhost:8765/ws")
         logger.info(f"Connecting to WebSocket server: {server_url}")
@@ -127,6 +138,7 @@ async def main():
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(server_url) as ws:
                 logger.info("WebSocket接続が確立されました")
+                ws_connection = ws
                 
                 # サーバーからの音声を受信してVADで処理するタスク
                 async def receive_audio():
@@ -204,26 +216,54 @@ async def main():
                     except Exception as e:
                         logger.info(f"[VAD] Audio reception ended: {e}")
                 
+                # 音声送信用の変数
+                user_audio_chunks = None  # 送信する音声チャンク（.convoファイルに従って設定される）
+                audio_send_complete_event = asyncio.Event()  # 音声送信完了を通知するイベント
+                valid_loop = True  # ループ継続フラグ
+                
+                async def audio_sender_task():
+                    """音声送信タスク（常に動作し、デフォルトは無音、.convoに従って音声を送信）"""
+                    chunk_size = int(input_sample_rate * 0.01)  # 10ms
+                    chunk_duration = 0.01  # 10ms
+                    silence_chunk = np.zeros(chunk_size, dtype=np.int16)
+                    
+                    while valid_loop:
+                        nonlocal user_audio_chunks
+                        
+                        # 音声チャンクがある場合は音声を送信、ない場合は無音を送信
+                        if user_audio_chunks and len(user_audio_chunks) > 0:
+                            # 音声チャンクを送信
+                            chunk = user_audio_chunks.pop(0)
+                            await ws.send_bytes(chunk.tobytes())
+                            if len(user_audio_chunks) == 0:
+                                # すべての音声チャンクを送信完了
+                                logger.info("音声送信が完了しました")
+                                user_audio_chunks = None
+                                audio_send_complete_event.set()  # 送信完了を通知
+                        else:
+                            # 無音を送信（デフォルト）
+                            await ws.send_bytes(silence_chunk.tobytes())
+                        
+                        await asyncio.sleep(chunk_duration)  # 10ms待機
+                
                 # 音声受信タスクを開始
                 receive_task = asyncio.create_task(receive_audio())
                 logger.info("[VAD] Started receiving audio and VAD processing...")
                 
-                # 音声送信の設定
-                total_duration_seconds = 10.0  # 総送信時間（10秒）
-                chunk_size = int(input_sample_rate * 0.01)  # 10ms
-                chunk_duration = 0.01  # 10ms
-                total_chunks = int(total_duration_seconds / chunk_duration)  # 総チャンク数
+                # 音声送信タスクを開始（常に動作し、デフォルトは無音）
+                audio_sender = asyncio.create_task(audio_sender_task())
                 
-                # 無音チャンク（0で埋める）
-                silence_chunk = np.zeros(chunk_size, dtype=np.int16)
-                
-                # 音声ファイルを送信
-                audio_data = None
-                audio_duration = 0.0
-                
-                if audio_file:
+                # 音声送信関数（シナリオ実行時に使用）
+                async def send_audio_file(audio_file_path: str):
+                    """音声ファイルを送信する関数（音声ファイルの長さ分だけ送信）"""
+                    nonlocal user_audio_chunks
+                    audio_path = Path(audio_file_path)
+                    if not audio_path.exists():
+                        logger.warning(f"Audio file not found: {audio_file_path}")
+                        return
+                    
                     try:
-                        audio_data, sr = sf.read(audio_file)
+                        audio_data, sr = sf.read(audio_path)
                         
                         # モノラルに変換
                         if len(audio_data.shape) > 1:
@@ -244,42 +284,46 @@ async def main():
                                 logger.warning(f"scipyがインストールされていないため、リサンプリングをスキップします。"
                                              f"音声ファイルのサンプルレート({sr}Hz)が期待値({input_sample_rate}Hz)と異なる場合、"
                                              f"音声の速度が正しくない可能性があります。")
-                                # リサンプリングできない場合は警告のみ
+                        
+                        # 音声データをチャンクに分割
+                        chunk_size = int(input_sample_rate * 0.01)  # 10ms
+                        user_audio_chunks = []
+                        for i in range(0, len(audio_data), chunk_size):
+                            chunk = audio_data[i:i+chunk_size]
+                            # チャンクサイズに満たない場合は0でパディング
+                            if len(chunk) < chunk_size:
+                                padded_chunk = np.zeros(chunk_size, dtype=np.int16)
+                                padded_chunk[:len(chunk)] = chunk
+                                chunk = padded_chunk
+                            user_audio_chunks.append(chunk)
                         
                         audio_duration = len(audio_data) / input_sample_rate
-                        logger.info(f"音声ファイルを送信します: {audio_file} ({audio_duration:.2f}秒)")
+                        logger.info(f"音声ファイルを送信します: {audio_file_path} ({audio_duration:.2f}秒)")
+                        
+                        # 音声送信完了イベントをリセット
+                        audio_send_complete_event.clear()
+                        
+                        # 音声送信が完了するまで待機
+                        await audio_send_complete_event.wait()
                         
                     except Exception as e:
                         logger.error(f"音声ファイルの読み込みエラー: {e}", exc_info=True)
-                        audio_data = None
                 
-                # 10秒間、音声または無音を送信
-                audio_chunks = []
-                if audio_data is not None:
-                    # 音声データをチャンクに分割
-                    for i in range(0, len(audio_data), chunk_size):
-                        chunk = audio_data[i:i+chunk_size]
-                        # チャンクサイズに満たない場合は0でパディング
-                        if len(chunk) < chunk_size:
-                            padded_chunk = np.zeros(chunk_size, dtype=np.int16)
-                            padded_chunk[:len(chunk)] = chunk
-                            chunk = padded_chunk
-                        audio_chunks.append(chunk)
+                # シナリオを実行
+                await orchestrator.run_scenario(
+                    convo_file=str(convo_path),
+                    audio_sender=send_audio_file
+                )
                 
-                audio_chunk_count = len(audio_chunks)
-                logger.info(f"音声送信を開始します（総時間: {total_duration_seconds}秒、音声: {audio_duration:.2f}秒、無音: {total_duration_seconds - audio_duration:.2f}秒）")
+                # ループフラグを無効化
+                valid_loop = False
                 
-                for chunk_idx in range(total_chunks):
-                    if chunk_idx < audio_chunk_count:
-                        # 音声チャンクを送信
-                        await ws.send_bytes(audio_chunks[chunk_idx].tobytes())
-                    else:
-                        # 無音チャンクを送信
-                        await ws.send_bytes(silence_chunk.tobytes())
-                    
-                    await asyncio.sleep(chunk_duration)  # 10ms待機
-                
-                logger.info("音声送信が完了しました（10秒間）")
+                # 音声送信タスクをキャンセル
+                audio_sender.cancel()
+                try:
+                    await audio_sender
+                except asyncio.CancelledError:
+                    pass
                 
                 # 受信タスクをキャンセル
                 receive_task.cancel()

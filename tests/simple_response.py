@@ -45,9 +45,77 @@ async def websocket_handler(request):
     
     # VAD検出器を初期化
     input_sample_rate = 24000  # WebSocketで受信する音声のサンプルレート（OpenAI Realtime API標準）
-    vad_sample_rate = 16000  # silero-vadが期待するサンプルレート
-    response_sent = False
+    vad_sample_rate = 16000  # webrtcvadが期待するサンプルレート
     should_send_response = False
+    
+    # 応答音声データ（立ち下がり検出時に設定される）
+    response_audio_chunks = None
+    
+    async def audio_sender_task():
+        """音声送信タスク（常に動作し、デフォルトは無音、条件満たすと音声を送信）"""
+        chunk_size = int(input_sample_rate * 0.01)  # 10ms
+        chunk_duration = 0.01  # 10ms
+        silence_chunk = np.zeros(chunk_size, dtype=np.int16)
+        
+        while valid_loop:
+            nonlocal response_audio_chunks, should_send_response
+            
+            # 応答音声を送信する必要がある場合
+            if should_send_response and response_audio_chunks is None:
+                # 応答音声ファイルを読み込む
+                response_audio_file = "tests/hello_48k.wav"
+                if os.path.exists(response_audio_file):
+                    print(f"応答音声を送信します: {response_audio_file}")
+                    
+                    # 音声ファイルを読み込む
+                    audio_data, sr = sf.read(response_audio_file)
+                    
+                    # モノラルに変換
+                    if len(audio_data.shape) > 1:
+                        audio_data = np.mean(audio_data, axis=1)
+                    
+                    # int16に変換
+                    if audio_data.dtype != np.int16:
+                        audio_data = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
+                    
+                    # サンプルレートを24000Hzにリサンプリング（必要に応じて）
+                    if sr != input_sample_rate:
+                        if has_scipy:
+                            num_samples = int(len(audio_data) * input_sample_rate / sr)
+                            audio_data = signal.resample(audio_data, num_samples).astype(np.int16)
+                            print(f"サンプルレートを{sr}Hzから{input_sample_rate}Hzにリサンプリングしました")
+                        else:
+                            print(f"[WARNING] scipyがインストールされていないため、リサンプリングをスキップします。")
+                    
+                    # 音声データをチャンクに分割
+                    response_audio_chunks = []
+                    for i in range(0, len(audio_data), chunk_size):
+                        chunk = audio_data[i:i+chunk_size]
+                        # チャンクサイズに満たない場合は0でパディング
+                        if len(chunk) < chunk_size:
+                            padded_chunk = np.zeros(chunk_size, dtype=np.int16)
+                            padded_chunk[:len(chunk)] = chunk
+                            chunk = padded_chunk
+                        response_audio_chunks.append(chunk)
+                    
+                    audio_duration = len(audio_data) / input_sample_rate
+                    print(f"応答音声送信を開始します（音声: {audio_duration:.2f}秒）")
+                    should_send_response = False  # フラグをリセット
+            
+            # 応答音声チャンクがある場合は音声を送信、ない場合は無音を送信
+            if response_audio_chunks and len(response_audio_chunks) > 0:
+                # 音声チャンクを送信
+                chunk = response_audio_chunks.pop(0)
+                await ws.send_bytes(chunk.tobytes())
+                if len(response_audio_chunks) == 0:
+                    # すべての音声チャンクを送信完了
+                    print("応答音声の送信が完了しました")
+                    response_audio_chunks = None
+            else:
+                # 無音を送信（デフォルト）
+                await ws.send_bytes(silence_chunk.tobytes())
+            
+            await asyncio.sleep(chunk_duration)  # 10ms待機
     
     # VAD検出のコールバック
     def on_speech_start(timestamp: float):
@@ -110,6 +178,9 @@ async def websocket_handler(request):
             await ws.close()
     
     shutdown_task = asyncio.create_task(monitor_shutdown())
+    
+    # 音声送信タスクを開始（常に動作し、デフォルトは無音）
+    audio_sender = asyncio.create_task(audio_sender_task())
     
     try:
         async for msg in ws:
@@ -177,71 +248,8 @@ async def websocket_handler(request):
                         # VADで処理（立ち上がり/立ち下がりはコールバックで出力）
                         vad_detector.process_audio_frame(vad_chunk, relative_time)
                 
-                # 応答音声を送信する必要があるかチェック
-                if should_send_response and not response_sent:
-                    response_sent = True
-                    response_audio_file = "tests/hello_48k.wav"
-                    if os.path.exists(response_audio_file):
-                        print(f"応答音声を送信します: {response_audio_file}")
-                        
-                        # 音声ファイルを読み込んで送信
-                        audio_data, sr = sf.read(response_audio_file)
-                        
-                        # モノラルに変換
-                        if len(audio_data.shape) > 1:
-                            audio_data = np.mean(audio_data, axis=1)
-                        
-                        # int16に変換
-                        if audio_data.dtype != np.int16:
-                            audio_data = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
-                        
-                        # サンプルレートを24000Hzにリサンプリング（必要に応じて）
-                        if sr != input_sample_rate:
-                            if has_scipy:
-                                num_samples = int(len(audio_data) * input_sample_rate / sr)
-                                audio_data = signal.resample(audio_data, num_samples).astype(np.int16)
-                                print(f"サンプルレートを{sr}Hzから{input_sample_rate}Hzにリサンプリングしました")
-                            else:
-                                print(f"[WARNING] scipyがインストールされていないため、リサンプリングをスキップします。")
-                        
-                        # 10秒間の送信を保証
-                        total_duration_seconds = 10.0  # 総送信時間（10秒）
-                        chunk_size = int(input_sample_rate * 0.01)  # 10ms
-                        chunk_duration = 0.01  # 10ms
-                        total_chunks = int(total_duration_seconds / chunk_duration)  # 総チャンク数
-                        
-                        # 無音チャンク（0で埋める）
-                        silence_chunk = np.zeros(chunk_size, dtype=np.int16)
-                        
-                        # 音声データをチャンクに分割
-                        audio_chunks = []
-                        for i in range(0, len(audio_data), chunk_size):
-                            chunk = audio_data[i:i+chunk_size]
-                            # チャンクサイズに満たない場合は0でパディング
-                            if len(chunk) < chunk_size:
-                                padded_chunk = np.zeros(chunk_size, dtype=np.int16)
-                                padded_chunk[:len(chunk)] = chunk
-                                chunk = padded_chunk
-                            audio_chunks.append(chunk)
-                        
-                        audio_duration = len(audio_data) / input_sample_rate
-                        audio_chunk_count = len(audio_chunks)
-                        print(f"応答音声送信を開始します（総時間: {total_duration_seconds}秒、音声: {audio_duration:.2f}秒、無音: {total_duration_seconds - audio_duration:.2f}秒）")
-                        
-                        # 10秒間、音声または無音を送信
-                        for chunk_idx in range(total_chunks):
-                            if chunk_idx < audio_chunk_count:
-                                # 音声チャンクを送信
-                                await ws.send_bytes(audio_chunks[chunk_idx].tobytes())
-                            else:
-                                # 無音チャンクを送信
-                                await ws.send_bytes(silence_chunk.tobytes())
-                            
-                            await asyncio.sleep(chunk_duration)  # 10ms待機
-                        
-                        print("応答音声の送信が完了しました（10秒間）")
-                    else:
-                        print(f"応答音声ファイルが見つかりません: {response_audio_file}")
+                # should_send_responseフラグはaudio_sender_task内で処理される
+                # ここでは何もしない（VADコールバックでフラグを設定するだけ）
                                 
             elif msg.type == WSMsgType.ERROR:
                 print(f"WebSocketエラー: {ws.exception()}")
@@ -255,6 +263,14 @@ async def websocket_handler(request):
     finally:
         # ループフラグを無効化
         valid_loop = False
+        
+        # 音声送信タスクをキャンセル
+        if 'audio_sender' in locals() and audio_sender is not None and not audio_sender.done():
+            audio_sender.cancel()
+            try:
+                await audio_sender
+            except asyncio.CancelledError:
+                pass
         
         # シャットダウン監視タスクをキャンセル
         shutdown_task.cancel()
