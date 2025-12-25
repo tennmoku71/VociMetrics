@@ -181,10 +181,8 @@ ive-tester/
 │   ├── __init__.py
 │   ├── convo_parser.py     # Botium形式(.convo)のパース
 │   └── config_loader.py    # botium.json / config.jsonの読み込み
-├── data/
-│   ├── scenarios/          # .convo ファイル置き場
-│   ├── audio_source/       # ルールテスト用WAVファイル
-│   └── reports/            # 実行結果（JSON/録音）の出力先
+├── scenarios/              # .convo ファイル置き場
+└── reports/               # 実行結果（JSON/録音）の出力先
 ├── tests/                  # IVE自体のユニットテスト
 ├── config.json             # 全体設定
 ├── requirements.txt

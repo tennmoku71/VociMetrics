@@ -30,7 +30,7 @@ class UnifiedLogger:
     音声パケットの送受信とAPIフックの時刻を単一の時計で記録する仕組み
     """
     
-    def __init__(self, output_dir: str = "data/reports"):
+    def __init__(self, output_dir: str = "reports"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.events: List[Dict[str, Any]] = []
@@ -171,11 +171,11 @@ class Orchestrator:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.logger = UnifiedLogger(
-            output_dir=config.get("logging", {}).get("output_dir", "data/reports")
+            output_dir=config.get("logging", {}).get("output_dir", "reports")
         )
         if ConvoParser:
             self.convo_parser = ConvoParser(
-                scenarios_dir=config.get("scenarios_dir", "data/scenarios")
+                scenarios_dir=config.get("scenarios_dir", "scenarios")
             )
         else:
             self.convo_parser = None

@@ -74,7 +74,7 @@ class ScenarioAction:
 class ConvoParser:
     """Botium形式の.convoファイルパーサー"""
     
-    def __init__(self, scenarios_dir: str = "data/scenarios"):
+    def __init__(self, scenarios_dir: str = "scenarios"):
         self.scenarios_dir = Path(scenarios_dir)
         self.scenarios_dir.mkdir(parents=True, exist_ok=True)
     

@@ -79,7 +79,7 @@ def test_vad_on_file(audio_file: str, sample_rate: int = 16000):
     )
     
     # ロガーを初期化
-    logger_instance = UnifiedLogger(output_dir="data/reports")
+    logger_instance = UnifiedLogger(output_dir="reports")
     logger_instance.start_test("vad_file_test", test_type="rule")
     
     # VADで処理

@@ -43,6 +43,7 @@ logs/
 
 # Reports and Data
 data/reports/
+reports/
 data/audio_source/*.mp3
 data/audio_source/*.wav
 data/audio_source/*.m4a

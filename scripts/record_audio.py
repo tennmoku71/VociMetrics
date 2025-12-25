@@ -26,7 +26,7 @@ def record_audio(duration: float = 10.0, sample_rate: int = 16000, output_file: 
     # 出力ファイルのパスを決定
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path("data/reports")
+        output_dir = Path("reports")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = str(output_dir / f"recorded_{timestamp}.wav")
     

@@ -111,12 +111,12 @@ async def main():
         vad_sample_rate = 16000  # webrtcvadが期待するサンプルレート
         
         # .convoファイルのパスを取得（コマンドライン引数またはデフォルト）
-        convo_file = sys.argv[1] if len(sys.argv) > 1 else "data/scenarios/dialogue.convo"
+        convo_file = sys.argv[1] if len(sys.argv) > 1 else "scenarios/dialogue.convo"
         convo_path = Path(convo_file)
         
         if not convo_path.exists():
             # scenarios_dirからの相対パスを試す
-            scenarios_dir = config.get("scenarios_dir", "data/scenarios")
+            scenarios_dir = config.get("scenarios_dir", "scenarios")
             convo_path = Path(scenarios_dir) / convo_file
             if not convo_path.exists():
                 logger.error(f"Convo file not found: {convo_file}")
@@ -131,7 +131,7 @@ async def main():
             logger.warning("TTSエンジンが初期化されませんでした。テキスト形式の#meは使用できません。")
         
         # .convoファイルをパース
-        convo_parser = ConvoParser(scenarios_dir=config.get("scenarios_dir", "data/scenarios"))
+        convo_parser = ConvoParser(scenarios_dir=config.get("scenarios_dir", "scenarios"))
         actions = convo_parser.parse(str(convo_path))
         
         # テキスト形式の#meアクションをTTSで音声ファイルに変換
@@ -550,7 +550,7 @@ async def main():
                         stereo_audio_float = stereo_audio.astype(np.float32) / 32767.0
                         
                         # WAVファイルとして保存
-                        output_dir = Path(config.get("logging", {}).get("output_dir", "data/reports"))
+                        output_dir = Path(config.get("logging", {}).get("output_dir", "reports"))
                         output_dir.mkdir(parents=True, exist_ok=True)
                         output_file = output_dir / f"{test_id}_recording.wav"
                         sf.write(str(output_file), stereo_audio_float, input_sample_rate)
