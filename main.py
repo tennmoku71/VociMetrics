@@ -65,8 +65,19 @@ def setup_logging(test_id: str, logs_dir: str = "logs"):
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_path: str = "config.json") -> dict:
-    """設定ファイルを読み込む"""
+def load_config(config_path: Optional[str] = None) -> dict:
+    """設定ファイルを読み込む
+    
+    Args:
+        config_path: 設定ファイルのパス。Noneの場合はconfig.jsonを使用
+    """
+    if config_path is None:
+        # コマンドライン引数から設定ファイルパスを取得
+        if len(sys.argv) > 2:
+            config_path = sys.argv[2]
+        else:
+            config_path = "config.json"
+    
     config_file = Path(config_path)
     if not config_file.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -78,7 +89,7 @@ def load_config(config_path: str = "config.json") -> dict:
 async def main():
     """WebSocketクライアントとして動作（評価ツール）"""
     try:
-        # 設定ファイルを読み込み
+        # 設定ファイルを読み込み（コマンドライン引数で指定可能）
         config = load_config()
         
         # テストIDを生成（簡易版）
@@ -103,7 +114,7 @@ async def main():
         evaluator = Evaluator(config)
         
         # テキスト比較エンジンを初期化
-        text_matcher = create_text_matcher(config.get("text_matching", {}))
+        text_matcher = create_text_matcher(config.get("text_matching", {}), full_config=config)
         
         # VAD検出器を初期化（サーバーからの音声を検出）
         websocket_config = config.get("websocket", {})
@@ -411,7 +422,8 @@ async def main():
                 white_noise_snr_db = white_noise_config.get("snr_db", 20.0)
                 # 無音時のノイズレベル（固定値、int16の最大値に対する比率）
                 # 例: 0.01 = 最大振幅の1%のノイズ
-                white_noise_background_level = white_noise_config.get("background_level", 0.01)
+                background_noise_config = white_noise_config.get("background_noise", {})
+                white_noise_background_level = background_noise_config.get("level", 0.01) if background_noise_config.get("enabled", True) else 0.0
                 
                 if white_noise_enabled:
                     logger.info(f"[White Noise] Enabled with SNR: {white_noise_snr_db}dB (background level: {white_noise_background_level})")
@@ -419,6 +431,7 @@ async def main():
                     logger.debug("[White Noise] Disabled")
                 
                 # ホワイトノイズ生成関数
+                background_noise_enabled = background_noise_config.get("enabled", True)
                 def add_white_noise(audio_chunk: np.ndarray, snr_db: float, is_silence: bool = False) -> np.ndarray:
                     """音声チャンクにホワイトノイズを追加
                     
@@ -433,13 +446,16 @@ async def main():
                     if not white_noise_enabled:
                         return audio_chunk
                     
-                    # 背景ノイズを常に追加
-                    background_noise_amplitude = 32767.0 * white_noise_background_level
-                    background_noise = np.random.normal(0, background_noise_amplitude, len(audio_chunk))
-                    background_noise_int16 = np.clip(background_noise, -32768, 32767).astype(np.int16)
+                    # 背景ノイズを追加（有効な場合のみ）
+                    if background_noise_enabled:
+                        background_noise_amplitude = 32767.0 * white_noise_background_level
+                        background_noise = np.random.normal(0, background_noise_amplitude, len(audio_chunk))
+                        background_noise_int16 = np.clip(background_noise, -32768, 32767).astype(np.int16)
+                    else:
+                        background_noise_int16 = np.zeros_like(audio_chunk, dtype=np.int16)
                     
                     if is_silence:
-                        # 無音の場合は背景ノイズのみ
+                        # 無音の場合は背景ノイズのみ（有効な場合）
                         return background_noise_int16
                     
                     # 音声のパワーを計算（RMS）
@@ -624,7 +640,6 @@ async def main():
                         logger.debug(f"録音を保存しました: {output_file}")
                         logger.debug(f"  左チャンネル（ユーザー音声）: {len(user_audio)/input_sample_rate:.2f}秒")
                         logger.debug(f"  右チャンネル（ボット音声）: {len(bot_audio)/input_sample_rate:.2f}秒")
-                        
                     except Exception as e:
                         logger.error(f"録音の保存エラー: {e}", exc_info=True)
                 

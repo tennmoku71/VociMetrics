@@ -299,7 +299,6 @@ class Evaluator:
         """
         metrics = {
             "response_latency_ms": None,
-            "think_time_ms": None,
             "user_speech_duration_ms": None,
             "bot_speech_duration_ms": None,
             "interrupt_to_speech_end_ms": None,
@@ -336,16 +335,6 @@ class Evaluator:
         else:
             metrics["response_latency_ms"] = None
             metrics["response_latency_ok"] = False
-        
-        # Think Time: API_CALL_ENDからBOT_SPEECH_STARTまでの時間
-        api_call_end_time = None
-        for event in events:
-            if event.get("type") == "API_CALL_END":
-                api_call_end_time = event.get("time")
-            elif event.get("type") == "BOT_SPEECH_START":
-                if api_call_end_time is not None:
-                    metrics["think_time_ms"] = event.get("time") - api_call_end_time
-                    break
         
         # User Speech Duration: USER_SPEECH_STARTからUSER_SPEECH_ENDまでの時間
         user_speech_start_time = None
@@ -387,15 +376,10 @@ class Evaluator:
         
         # 閾値との比較
         response_latency_threshold = eval_config.get("response_latency_threshold_ms", 800)
-        think_time_threshold = eval_config.get("think_time_threshold_ms", 500)
         
         metrics["response_latency_ok"] = (
             metrics["response_latency_ms"] is not None and
             metrics["response_latency_ms"] <= response_latency_threshold
-        )
-        metrics["think_time_ok"] = (
-            metrics["think_time_ms"] is not None and
-            metrics["think_time_ms"] <= think_time_threshold
         )
         
         # Toolcall評価

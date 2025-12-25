@@ -45,8 +45,10 @@ class LLMConversationEvaluator:
             "- tone_consistency_score: トーンの一貫性（0.0-1.0）\n"
             "- omotenashi_score: おもてなしスコア（1-5の整数）"
         )
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.openai_api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
+        # API Keyの優先順位: 環境変数 > config.json
+        openai_config = config.get("openai", {})
+        self.openai_api_key = os.getenv("OPENAI_API_KEY") or openai_config.get("api_key", "")
+        self.openai_api_base = os.getenv("OPENAI_API_BASE_URL") or openai_config.get("api_base_url", "https://api.openai.com/v1")
     
     def evaluate_conversation(
         self,

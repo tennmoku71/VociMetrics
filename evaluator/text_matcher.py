@@ -19,8 +19,14 @@ class MatchMethod(Enum):
 class TextMatcher:
     """テキスト比較エンジン"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], full_config: Optional[Dict[str, Any]] = None):
+        """
+        Args:
+            config: text_matchingセクションの設定
+            full_config: 全体の設定（openaiセクションを含む）。Noneの場合はconfigから取得を試みる
+        """
         self.config = config
+        self.full_config = full_config or config  # 後方互換性のため
         self.match_method = MatchMethod(config.get("match_method", "exact"))
         self.edit_distance_threshold = config.get("edit_distance_threshold", 0.8)  # 0.0-1.0（類似度）
         
@@ -37,8 +43,9 @@ class TextMatcher:
             "user_prompt_template",
             "以下の期待される応答例と実際の応答を比較し、実際の応答が期待される応答として自然で適切かを評価してください。\n\n期待される応答例: {expected_text}\n実際の応答: {actual_text}\n\nJSON形式でスコアを返してください。"
         )
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.openai_api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
+        # API Keyの優先順位: 環境変数 > config.json
+        self.openai_api_key = os.getenv("OPENAI_API_KEY") or self.full_config.get("openai", {}).get("api_key", "")
+        self.openai_api_base = os.getenv("OPENAI_API_BASE_URL") or self.full_config.get("openai", {}).get("api_base_url", "https://api.openai.com/v1")
     
     def match(self, expected_text: str, actual_text: str) -> Dict[str, Any]:
         """
@@ -250,7 +257,12 @@ class TextMatcher:
         return normalized
 
 
-def create_text_matcher(config: Dict[str, Any]) -> TextMatcher:
-    """設定に基づいてTextMatcherを作成"""
-    return TextMatcher(config)
+def create_text_matcher(config: Dict[str, Any], full_config: Optional[Dict[str, Any]] = None) -> TextMatcher:
+    """設定に基づいてTextMatcherを作成
+    
+    Args:
+        config: text_matchingセクションの設定
+        full_config: 全体の設定（openaiセクションを含む）。Noneの場合はconfigから取得を試みる
+    """
+    return TextMatcher(config, full_config)
 
