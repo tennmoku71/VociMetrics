@@ -343,9 +343,9 @@ async def main():
                     audio_sender=send_audio_file
                 )
                 
-                # シナリオ実行完了後、1秒余裕を持たせてから終了
+                # シナリオ実行完了後、3秒余裕を持たせてから終了
                 # （シナリオ内の最後のWAIT_FOR_BOT_SPEECH_ENDは既に完了している）
-                await asyncio.sleep(1.0)  # 1秒待機
+                await asyncio.sleep(3.0)  # 3秒待機
                 
                 # 録音を停止
                 recording_enabled = False
