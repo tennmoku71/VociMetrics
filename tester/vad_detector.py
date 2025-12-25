@@ -84,7 +84,7 @@ class VADDetector:
                     self.vad = None
                     return
                 
-                logger.info(f"[VADDetector] webrtcvad initialized successfully (aggressiveness={aggressiveness}, sample_rate={self.sample_rate}Hz)")
+                logger.debug(f"[VADDetector] webrtcvad initialized successfully (aggressiveness={aggressiveness}, sample_rate={self.sample_rate}Hz)")
             except Exception as e:
                 logger.warning(f"[VADDetector] Failed to initialize webrtcvad: {e}")
                 self.vad = None

@@ -12,9 +12,14 @@ from pathlib import Path
 from tester.orchestrator import Orchestrator
 from tester.vad_detector import VADDetector
 from evaluator.evaluator import Evaluator
+from evaluator.tts_engine import create_tts_engine
+from evaluator.text_matcher import create_text_matcher
+from parser.convo_parser import ConvoParser
 import numpy as np
 import soundfile as sf
 import aiohttp
+import tempfile
+import hashlib
 
 
 def setup_logging(test_id: str, logs_dir: str = "logs"):
@@ -26,18 +31,22 @@ def setup_logging(test_id: str, logs_dir: str = "logs"):
     log_filename = logs_path / f"{test_id}.log"
     
     # フォーマット設定
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    # ファイル用: 詳細なフォーマット（タイムスタンプ、ロガー名、レベルを含む）
+    file_log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
+    
+    # コンソール用: シンプルなフォーマット（メッセージのみ）
+    console_log_format = '%(message)s'
     
     # ファイルハンドラー
     file_handler = logging.FileHandler(log_filename, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(log_format, date_format))
+    file_handler.setFormatter(logging.Formatter(file_log_format, date_format))
     
     # コンソールハンドラー
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(logging.Formatter(log_format, date_format))
+    console_handler.setFormatter(logging.Formatter(console_log_format))
     
     # ルートロガーに設定
     root_logger = logging.getLogger()
@@ -88,13 +97,16 @@ async def main():
         # 評価エンジンを初期化
         evaluator = Evaluator(config)
         
+        # テキスト比較エンジンを初期化
+        text_matcher = create_text_matcher(config.get("text_matching", {}))
+        
         # VAD検出器を初期化（サーバーからの音声を検出）
         websocket_config = config.get("websocket", {})
         input_sample_rate = websocket_config.get("sample_rate", 24000)  # WebSocketで受信する音声のサンプルレート
         vad_sample_rate = 16000  # webrtcvadが期待するサンプルレート
         
         # .convoファイルのパスを取得（コマンドライン引数またはデフォルト）
-        convo_file = sys.argv[1] if len(sys.argv) > 1 else "data/scenarios/sample.convo"
+        convo_file = sys.argv[1] if len(sys.argv) > 1 else "data/scenarios/dialogue.convo"
         convo_path = Path(convo_file)
         
         if not convo_path.exists():
@@ -107,6 +119,43 @@ async def main():
                 sys.exit(1)
         
         logger.info(f"Using convo file: {convo_path}")
+        
+        # TTSエンジンを初期化
+        tts_engine = create_tts_engine(config)
+        if tts_engine is None:
+            logger.warning("TTSエンジンが初期化されませんでした。テキスト形式の#meは使用できません。")
+        
+        # .convoファイルをパース
+        convo_parser = ConvoParser(scenarios_dir=config.get("scenarios_dir", "data/scenarios"))
+        actions = convo_parser.parse(str(convo_path))
+        
+        # テキスト形式の#meアクションをTTSで音声ファイルに変換
+        if tts_engine:
+            # 一時ディレクトリを作成（テストIDごと）
+            temp_audio_dir = Path(tempfile.gettempdir()) / "ive_tts" / test_id
+            temp_audio_dir.mkdir(parents=True, exist_ok=True)
+            
+            text_counter = 0
+            for action in actions:
+                if action.action_type == "USER_SPEECH_START" and action.text and not action.audio_file:
+                    # テキストをハッシュ化してファイル名に使用（同じテキストは再利用）
+                    text_hash = hashlib.md5(action.text.encode('utf-8')).hexdigest()
+                    audio_file_path = temp_audio_dir / f"tts_{text_counter}_{text_hash}.wav"
+                    
+                    # 既に存在する場合はスキップ
+                    if not audio_file_path.exists():
+                        logger.debug(f"[TTS] テキストを音声に変換中: \"{action.text}\"")
+                        if tts_engine.synthesize(action.text, str(audio_file_path)):
+                            logger.debug(f"[TTS] 音声ファイルを保存しました: {audio_file_path}")
+                        else:
+                            logger.error(f"[TTS] 音声合成に失敗しました: \"{action.text}\"")
+                            continue
+                    else:
+                        logger.debug(f"[TTS] 既存の音声ファイルを使用: {audio_file_path}")
+                    
+                    # audio_fileに設定
+                    action.audio_file = str(audio_file_path)
+                    text_counter += 1
         
         # WebSocket接続とVAD検出器を初期化（シナリオ実行中に使用）
         ws_connection = None
@@ -133,8 +182,13 @@ async def main():
             if client_vad_timestamps.get("speech_start_detected") is None:
                 client_vad_timestamps["speech_start_detected"] = current_time
             
-            logger.info(f"[VAD] Bot speech started at {timestamp:.3f}s")
-            orchestrator.logger.log_bot_speech_start()
+            logger.debug(f"[VAD] Bot speech started at {timestamp:.3f}s")
+            # VAD検出時刻をサンプル数に変換（録音開始からの相対位置）
+            # VADの遅延を考慮: 実際の音声開始は min_speech_duration_ms 前
+            vad_delay_ms = vad_detector.min_speech_duration_ms if vad_detector else 300
+            actual_start_timestamp = timestamp - (vad_delay_ms / 1000.0)
+            vad_start_sample = max(0, int(actual_start_timestamp * input_sample_rate))
+            orchestrator.logger.log_bot_speech_start(vad_start_sample=vad_start_sample)
             orchestrator.notify_event("BOT_SPEECH_START")
             
             # イベント記録時刻を記録
@@ -159,8 +213,12 @@ async def main():
         
         def on_bot_speech_end(timestamp: float):
             """ボット（サーバー）の音声終了を記録"""
-            logger.info(f"[VAD] Bot speech ended at {timestamp:.3f}s")
-            orchestrator.logger.log_bot_speech_end()
+            logger.debug(f"[VAD] Bot speech ended at {timestamp:.3f}s")
+            # VAD検出時刻をサンプル数に変換（録音開始からの相対位置）
+            # timestampは既にsilence_start_time（無音が始まった時刻）= 実際の音声終了時刻
+            # min_silence_duration_msは検出の遅延であり、実際の音声終了時刻ではない
+            vad_end_sample = max(0, int(timestamp * input_sample_rate))
+            orchestrator.logger.log_bot_speech_end(vad_end_sample=vad_end_sample)
             orchestrator.notify_event("BOT_SPEECH_END")
         
         # VAD検出器を初期化
@@ -175,11 +233,11 @@ async def main():
         
         # WebSocketサーバーに接続
         server_url = websocket_config.get("server_url", "ws://localhost:8765/ws")
-        logger.info(f"Connecting to WebSocket server: {server_url}")
+        logger.debug(f"Connecting to WebSocket server: {server_url}")
         
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(server_url) as ws:
-                logger.info("WebSocket接続が確立されました")
+                logger.debug("WebSocket接続が確立されました")
                 ws_connection = ws
                 
                 # サーバーからの音声を受信してVADで処理するタスク
@@ -339,7 +397,7 @@ async def main():
                 
                 # 音声受信タスクを開始
                 receive_task = asyncio.create_task(receive_audio())
-                logger.info("[VAD] Started receiving audio and VAD processing...")
+                logger.debug("[VAD] Started receiving audio and VAD processing...")
                 
                 # 音声送信タスクを開始（常に動作し、デフォルトは無音）
                 audio_sender = asyncio.create_task(audio_sender_task())
@@ -389,7 +447,7 @@ async def main():
                             user_audio_chunks.append(chunk)
                         
                         audio_duration = len(audio_data) / input_sample_rate
-                        logger.info(f"音声ファイルを送信します: {audio_file_path} ({audio_duration:.2f}秒)")
+                        logger.debug(f"音声ファイルを送信します: {audio_file_path} ({audio_duration:.2f}秒)")
                         
                         # 音声送信完了イベントをリセット
                         audio_send_complete_event.clear()
@@ -400,9 +458,9 @@ async def main():
                     except Exception as e:
                         logger.error(f"音声ファイルの読み込みエラー: {e}", exc_info=True)
                 
-                # シナリオを実行
+                # シナリオを実行（パース済みのアクションを使用）
                 await orchestrator.run_scenario(
-                    convo_file=str(convo_path),
+                    actions=actions,
                     audio_sender=send_audio_file
                 )
                 
@@ -458,9 +516,9 @@ async def main():
                         output_file = output_dir / f"{test_id}_recording.wav"
                         sf.write(str(output_file), stereo_audio_float, input_sample_rate)
                         
-                        logger.info(f"録音を保存しました: {output_file}")
-                        logger.info(f"  左チャンネル（ユーザー音声）: {len(user_audio)/input_sample_rate:.2f}秒")
-                        logger.info(f"  右チャンネル（ボット音声）: {len(bot_audio)/input_sample_rate:.2f}秒")
+                        logger.debug(f"録音を保存しました: {output_file}")
+                        logger.debug(f"  左チャンネル（ユーザー音声）: {len(user_audio)/input_sample_rate:.2f}秒")
+                        logger.debug(f"  右チャンネル（ボット音声）: {len(bot_audio)/input_sample_rate:.2f}秒")
                         
                     except Exception as e:
                         logger.error(f"録音の保存エラー: {e}", exc_info=True)
@@ -482,53 +540,121 @@ async def main():
                         # 評価指標を計算
                         metrics = evaluator.calculate_metrics(orchestrator.logger)
                         
+                        # ANSIエスケープコード（色分け）
+                        GREEN = '\033[92m'
+                        YELLOW = '\033[93m'
+                        RED = '\033[91m'
+                        RESET = '\033[0m'
+                        
+                        def get_score_color(score):
+                            """スコアに応じた色を返す"""
+                            if score is None:
+                                return RESET
+                            if score >= 80.0:
+                                return GREEN
+                            elif score >= 60.0:
+                                return YELLOW
+                            else:
+                                return RED
+                        
+                        # Output organized by categories
                         logger.info("=" * 60)
-                        logger.info("評価結果:")
-                        logger.info(f"  Response Latency: {metrics.get('response_latency_ms')}ms (閾値: {config.get('evaluation', {}).get('response_latency_threshold_ms', 800)}ms) {'✓' if metrics.get('response_latency_ok') else '✗'}")
-                        logger.info(f"  Think Time: {metrics.get('think_time_ms')}ms (閾値: {config.get('evaluation', {}).get('think_time_threshold_ms', 500)}ms) {'✓' if metrics.get('think_time_ok') else '✗'}")
-                        logger.info(f"  User Speech Duration: {metrics.get('user_speech_duration_ms')}ms")
-                        logger.info(f"  Bot Speech Duration: {metrics.get('bot_speech_duration_ms')}ms")
+                        # turntake: Response Latency, User Speech Duration, Bot Speech Duration
+                        logger.info("[turntake]")
+                        response_latency_ms = metrics.get('response_latency_ms')
+                        response_latency_threshold = config.get('evaluation', {}).get('response_latency_threshold_ms', 800)
+                        response_latency_ok = metrics.get('response_latency_ok', False)
+                        user_duration = metrics.get('user_speech_duration_ms')
+                        bot_duration = metrics.get('bot_speech_duration_ms')
+                        
+                        if response_latency_ms is not None:
+                            # 100 points if within threshold, linear deduction if exceeds (0 points at 2x threshold)
+                            if response_latency_ok:
+                                turntake_score = 100.0
+                            else:
+                                # Linear deduction if exceeds threshold (0 points at 2x threshold)
+                                turntake_score = max(0.0, 100.0 * (1.0 - (response_latency_ms - response_latency_threshold) / response_latency_threshold))
+                            logger.info(f"  Response Latency: {response_latency_ms:.1f}ms {'✓' if response_latency_ok else '✗'}")
+                            color = get_score_color(turntake_score)
+                            logger.info(f"  {color}Score: {turntake_score:.1f}/100{RESET}")
+                        else:
+                            logger.info(f"  Response Latency: N/A")
+                            logger.info(f"  Score: N/A")
+                        
+                        # User Speech Duration (informational only, not scored)
+                        if user_duration is not None:
+                            logger.info(f"  User Speech Duration: {user_duration}ms")
+                        
+                        # Bot Speech Duration (informational only, not scored)
+                        if bot_duration is not None:
+                            logger.info(f"  Bot Speech Duration: {bot_duration}ms")
+                        
+                        # sound: (empty for now)
+                        logger.info("[sound]")
+                        logger.info(f"  Score: N/A")
+                        
+                        # toolcall: (empty for now)
+                        logger.info("[toolcall]")
+                        logger.info(f"  Score: N/A")
+                        
+                        # dialogue: Text comparison results
+                        logger.info("[dialogue]")
+                        bot_texts = stt_results.get("bot_texts", [])
+                        dialogue_scores = []
+                        if bot_texts and orchestrator.expected_texts:
+                            # Compare for each BOT_SPEECH_START event
+                            for i, expected_text in enumerate(orchestrator.expected_texts):
+                                if expected_text and i < len(bot_texts):
+                                    actual_text = bot_texts[i]
+                                    if actual_text:
+                                        match_result = text_matcher.match(expected_text, actual_text)
+                                        # Detailed information is logged to file
+                                        logger.debug(f"  Expected text {i+1}: \"{expected_text}\"")
+                                        logger.debug(f"  Actual text: \"{actual_text}\"")
+                                        logger.debug(f"  Comparison method: {match_result['method']}")
+                                        logger.debug(f"  Match: {'✓' if match_result['matched'] else '✗'}")
+                                        if match_result.get('details'):
+                                            details = match_result['details']
+                                            if 'distance' in details:
+                                                logger.debug(f"  Edit distance: {details['distance']} / {details['max_length']}")
+                                                logger.debug(f"  Threshold: {details['threshold']}")
+                                        # Convert similarity score (0.0-1.0) to 100-point scale
+                                        score_100 = match_result['score'] * 100.0
+                                        dialogue_scores.append(score_100)
+                                        # Console shows only similarity score
+                                        logger.info(f"  Similarity score {i+1}: {match_result['score']:.3f} {'✓' if match_result['matched'] else '✗'}")
+                                    else:
+                                        logger.debug(f"  Expected text {i+1}: \"{expected_text}\"")
+                                        logger.debug(f"  Actual text: (No STT result)")
+                                        logger.debug(f"  Match: ✗")
+                                        logger.info(f"  Similarity score {i+1}: N/A ✗")
+                                        dialogue_scores.append(0.0)
+                            
+                            # Calculate average score
+                            if dialogue_scores:
+                                dialogue_score = sum(dialogue_scores) / len(dialogue_scores)
+                                color = get_score_color(dialogue_score)
+                                logger.info(f"  {color}Score: {dialogue_score:.1f}/100{RESET}")
+                            else:
+                                logger.info(f"  Score: N/A")
+                                dialogue_score = None
+                        else:
+                            logger.info("  (No text comparison)")
+                            logger.info(f"  Score: N/A")
+                            dialogue_score = None
+                        
                         logger.info("=" * 60)
                         
                     except Exception as e:
                         logger.error(f"評価処理エラー: {e}", exc_info=True)
         
-        # 応答時間分析を出力（タイムラインから計算）
-        events = orchestrator.logger.events
-        user_speech_ends = [e for e in events if e.get("type") == "USER_SPEECH_END"]
-        bot_speech_starts = [e for e in events if e.get("type") == "BOT_SPEECH_START"]
-        
-        if user_speech_ends and bot_speech_starts:
-            # 各USER_SPEECH_ENDに対応するBOT_SPEECH_STARTを探して応答時間を計算
-            response_latencies = []
-            bot_idx = 0
-            for user_end in user_speech_ends:
-                user_end_time = user_end.get("time", 0)
-                
-                # 対応するBOT_SPEECH_STARTを探す（USER_SPEECH_ENDの後に最初に来るもの）
-                for j in range(bot_idx, len(bot_speech_starts)):
-                    if bot_speech_starts[j].get("time", 0) > user_end_time:
-                        bot_start_time = bot_speech_starts[j].get("time", 0)
-                        response_latency = bot_start_time - user_end_time
-                        response_latencies.append(response_latency)
-                        bot_idx = j + 1
-                        break
-            
-            if response_latencies:
-                avg_response_latency = sum(response_latencies) / len(response_latencies)
-                logger.info("=" * 60)
-                logger.info("応答時間分析（Response Latency）:")
-                logger.info(f"  平均応答時間: {avg_response_latency:.2f}ms (サンプル数: {len(response_latencies)})")
-                logger.info("=" * 60)
         
         # タイムラインを保存
         timeline_path = orchestrator.logger.save_timeline()
         
-        logger.info("=" * 60)
         logger.info("Client completed successfully!")
         logger.info(f"Timeline saved to: {timeline_path}")
         logger.info(f"Log file: {log_filename}")
-        logger.info("=" * 60)
         
     except Exception as e:
         logger.error(f"Error occurred: {e}", exc_info=True)

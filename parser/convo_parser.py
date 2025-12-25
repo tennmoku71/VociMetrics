@@ -89,7 +89,7 @@ class ConvoParser:
             if not convo_path.exists():
                 raise FileNotFoundError(f"Convo file not found: {convo_file}")
         
-        logger.info(f"Parsing convo file: {convo_path}")
+        logger.debug(f"Parsing convo file: {convo_path}")
         
         with open(convo_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -104,46 +104,83 @@ class ConvoParser:
             if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot"):
                 continue
             
-            # ユーザー発話: #me <audio_file_path>
+            # ユーザー発話: #me <audio_file_path> または #me <text>
             if line.startswith("#me"):
                 parts = line.split(None, 1)  # 最初の空白で分割
                 if len(parts) > 1:
-                    audio_file = parts[1].strip()
-                    actions.append(ScenarioAction(
-                        action_type="USER_SPEECH_START",
-                        speaker=Speaker.USER,
-                        audio_file=audio_file
-                    ))
+                    content = parts[1].strip()
+                    # ファイルパスかテキストかを判定
+                    # 1. 拡張子がある場合はファイルパスとみなす
+                    # 2. ファイルが存在する場合はファイルパスとみなす
+                    # 3. それ以外はテキストとみなす
+                    content_path = Path(content)
+                    has_extension = content_path.suffix.lower() in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']
+                    file_exists = content_path.exists()
+                    
+                    # scenarios_dirからの相対パスも確認
+                    if not file_exists and not content_path.is_absolute():
+                        relative_path = self.scenarios_dir.parent / content_path
+                        file_exists = relative_path.exists()
+                        if file_exists:
+                            content = str(relative_path)
+                    
+                    if has_extension or file_exists:
+                        # 音声ファイルパス
+                        actions.append(ScenarioAction(
+                            action_type="USER_SPEECH_START",
+                            speaker=Speaker.USER,
+                            audio_file=content
+                        ))
+                    else:
+                        # テキスト（TTSで変換する必要がある）
+                        actions.append(ScenarioAction(
+                            action_type="USER_SPEECH_START",
+                            speaker=Speaker.USER,
+                            text=content
+                        ))
                     actions.append(ScenarioAction(
                         action_type="USER_SPEECH_END",
                         speaker=Speaker.USER
                     ))
                 else:
-                    logger.warning(f"Invalid #me line (missing audio file): {line}")
+                    logger.warning(f"Invalid #me line (missing content): {line}")
             
-            # ボット発話: #bot [speechStart] または #bot [speechEnd]
+            # ボット発話: #bot [speechStart] または #bot [speechEnd] または #bot <expected_text>
             elif line.startswith("#bot"):
                 parts = line.split(None, 1)
                 if len(parts) > 1:
-                    marker = parts[1].strip()
-                    if marker == "[speechStart]":
+                    content = parts[1].strip()
+                    if content == "[speechStart]":
                         actions.append(ScenarioAction(
                             action_type="WAIT_FOR_BOT_SPEECH_START",
                             speaker=Speaker.BOT,
                             wait_for="BOT_SPEECH_START"
                         ))
-                    elif marker == "[speechEnd]":
+                    elif content == "[speechEnd]":
                         actions.append(ScenarioAction(
                             action_type="WAIT_FOR_BOT_SPEECH_END",
                             speaker=Speaker.BOT,
                             wait_for="BOT_SPEECH_END"
                         ))
                     else:
-                        logger.warning(f"Invalid #bot marker: {marker}")
+                        # 期待テキストとして扱う
+                        # speechStartとspeechEndの両方を待機し、テキスト比較も行う
+                        actions.append(ScenarioAction(
+                            action_type="WAIT_FOR_BOT_SPEECH_START",
+                            speaker=Speaker.BOT,
+                            wait_for="BOT_SPEECH_START",
+                            text=content  # 期待テキスト
+                        ))
+                        actions.append(ScenarioAction(
+                            action_type="WAIT_FOR_BOT_SPEECH_END",
+                            speaker=Speaker.BOT,
+                            wait_for="BOT_SPEECH_END",
+                            text=content  # 期待テキスト（比較用）
+                        ))
                 else:
-                    logger.warning(f"Invalid #bot line (missing marker): {line}")
+                    logger.warning(f"Invalid #bot line (missing content): {line}")
         
-        logger.info(f"Parsed {len(actions)} actions from convo file")
+        logger.debug(f"Parsed {len(actions)} actions from convo file")
         return actions
     
     

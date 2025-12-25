@@ -88,7 +88,7 @@ class SpeechRecognitionEngine(STTEngine):
             import speech_recognition as sr
             self.recognizer = sr.Recognizer()
             self.language = language
-            logger.info(f"[STT] SpeechRecognition engine initialized (language: {language})")
+            logger.debug(f"[STT] SpeechRecognition engine initialized (language: {language})")
         except ImportError:
             raise ImportError("speech_recognitionがインストールされていません。pip install SpeechRecognitionでインストールしてください。")
     
@@ -164,7 +164,7 @@ class VoskEngine(STTEngine):
             self.model = vosk.Model(model_path)
             self.recognizer = vosk.KaldiRecognizer(self.model, 16000)
             self.language = language
-            logger.info(f"[STT] Vosk engine initialized (model: {model_path})")
+            logger.debug(f"[STT] Vosk engine initialized (model: {model_path})")
         except ImportError:
             raise ImportError("voskがインストールされていません。pip install voskでインストールしてください。")
     

@@ -8,6 +8,13 @@ from typing import Dict, List, Any, Optional, Callable
 import logging
 
 try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm = None
+
+try:
     from parser.convo_parser import ConvoParser, ScenarioAction
 except ImportError:
     # パーサーモジュールがインポートできない場合のフォールバック
@@ -74,18 +81,33 @@ class UnifiedLogger:
             "type": "USER_SPEECH_END"
         })
         
-    def log_bot_speech_start(self, text: Optional[str] = None):
-        """ボット発話開始を記録"""
-        self.log_event({
+    def log_bot_speech_start(self, text: Optional[str] = None, vad_start_sample: Optional[int] = None):
+        """ボット発話開始を記録
+        
+        Args:
+            text: 認識されたテキスト（後から設定可能）
+            vad_start_sample: VAD検出開始時刻（サンプル数、録音開始からの相対位置、VAD遅延を考慮済み）
+        """
+        event_data = {
             "type": "BOT_SPEECH_START",
             "text": text
-        })
+        }
+        if vad_start_sample is not None:
+            event_data["vad_start_sample"] = vad_start_sample
+        self.log_event(event_data)
         
-    def log_bot_speech_end(self):
-        """ボット発話終了を記録"""
-        self.log_event({
+    def log_bot_speech_end(self, vad_end_sample: Optional[int] = None):
+        """ボット発話終了を記録
+        
+        Args:
+            vad_end_sample: VAD検出終了時刻（サンプル数、録音開始からの相対位置、VAD遅延を考慮済み）
+        """
+        event_data = {
             "type": "BOT_SPEECH_END"
-        })
+        }
+        if vad_end_sample is not None:
+            event_data["vad_end_sample"] = vad_end_sample
+        self.log_event(event_data)
         
     def log_api_call_start(self, function: str, args: Dict[str, Any]):
         """API呼び出し開始を記録"""
@@ -142,6 +164,8 @@ class Orchestrator:
             self.convo_parser = None
             logger.warning("[Orchestrator] ConvoParser not available")
         self.event_waiters: Dict[str, asyncio.Event] = {}
+        # 期待テキストを保存（BOT_SPEECH_STARTイベントごとに）
+        self.expected_texts: List[str] = []
         
     async def run_test(self, test_id: str, test_type: str = "rule"):
         """テストを開始（ロガーを初期化）"""
@@ -150,23 +174,28 @@ class Orchestrator:
     
     async def run_scenario(
         self,
-        convo_file: str,
+        convo_file: Optional[str] = None,
+        actions: Optional[List] = None,
         audio_sender: Optional[Callable] = None,
         event_handler: Optional[Callable] = None
     ):
         """シナリオを実行
         
         Args:
-            convo_file: .convoファイルのパス
+            convo_file: .convoファイルのパス（actionsがNoneの場合のみ使用）
+            actions: パース済みのアクションリスト（指定された場合はconvo_fileを無視）
             audio_sender: 音声ファイルを送信する関数（audio_file_pathを受け取る）
             event_handler: イベントハンドラー（event_type, dataを受け取る）
         """
-        if not self.convo_parser:
-            raise RuntimeError("ConvoParser not available")
+        if actions is None:
+            if not self.convo_parser:
+                raise RuntimeError("ConvoParser not available")
+            if convo_file is None:
+                raise ValueError("Either convo_file or actions must be provided")
+            # シナリオをパース
+            actions = self.convo_parser.parse(convo_file)
         
-        # シナリオをパース
-        actions = self.convo_parser.parse(convo_file)
-        logger.info(f"[Orchestrator] Executing scenario with {len(actions)} actions")
+        logger.info(f"[Orchestrator] シナリオ実行開始 ({len(actions)}アクション)")
         
         # イベント待機用のイベントを作成
         self.event_waiters = {
@@ -175,9 +204,21 @@ class Orchestrator:
             "USER_SPEECH_END": asyncio.Event()
         }
         
+        # プログレスバーを初期化
+        if TQDM_AVAILABLE:
+            pbar = tqdm(total=len(actions), desc="シナリオ実行", unit="アクション", ncols=80)
+        else:
+            pbar = None
+        
         # 各アクションを実行
         for i, action in enumerate(actions):
-            logger.info(f"[Orchestrator] Executing action {i+1}/{len(actions)}: {action.action_type}")
+            logger.debug(f"[Orchestrator] Executing action {i+1}/{len(actions)}: {action.action_type}")
+            
+            # プログレスバーを更新
+            if pbar:
+                action_name = action.action_type.replace("_", " ").title()
+                pbar.set_postfix({"現在": action_name})
+                pbar.update(1)
             
             # 遅延がある場合は待機
             if action.delay_ms > 0:
@@ -187,7 +228,7 @@ class Orchestrator:
             if action.action_type == "USER_SPEECH_START":
                 # ユーザー発話開始: 音声ファイルを送信
                 if audio_sender and action.audio_file:
-                    logger.info(f"[Orchestrator] Sending user speech: {action.audio_file}")
+                    logger.debug(f"[Orchestrator] Sending user speech: {action.audio_file}")
                     self.logger.log_user_speech_start(text=f"Audio file: {action.audio_file}")
                     await audio_sender(action.audio_file)
                     self.logger.log_user_speech_end()
@@ -195,11 +236,17 @@ class Orchestrator:
             
             elif action.action_type == "USER_SPEECH_END":
                 # ユーザー発話終了: ログに記録（音声送信はUSER_SPEECH_START内で完了している）
-                logger.info("[Orchestrator] User speech ended")
+                logger.debug("[Orchestrator] User speech ended")
                     
             elif action.action_type == "WAIT_FOR_BOT_SPEECH_START":
                 # ボット発話開始を待機（VAD検出）
-                logger.info(f"[Orchestrator] Waiting for bot speech start...")
+                logger.debug(f"[Orchestrator] Waiting for bot speech start...")
+                # 期待テキストがある場合は保存
+                if action.text:
+                    self.expected_texts.append(action.text)
+                    logger.debug(f"[Orchestrator] Expected bot text: \"{action.text}\"")
+                else:
+                    self.expected_texts.append(None)  # 期待テキストなし
                 # イベントをリセット（過去のイベントをクリア）
                 self.event_waiters["BOT_SPEECH_START"].clear()
                 self.event_waiters["BOT_SPEECH_END"].clear()  # BOT_SPEECH_ENDもクリア（過去のイベントを無視）
@@ -208,14 +255,14 @@ class Orchestrator:
                         self.event_waiters["BOT_SPEECH_START"].wait(),
                         timeout=15.0  # タイムアウトを15秒に延長
                     )
-                    logger.info("[Orchestrator] Bot speech detected!")
+                    logger.debug("[Orchestrator] Bot speech detected!")
                 except asyncio.TimeoutError:
                     logger.warning("[Orchestrator] Timeout waiting for bot speech start (15s)")
                     # タイムアウトしても続行
                     
             elif action.action_type == "WAIT_FOR_BOT_SPEECH_END":
                 # ボット発話終了を待機（VAD検出）
-                logger.info("[Orchestrator] Waiting for bot speech end...")
+                logger.debug("[Orchestrator] Waiting for bot speech end...")
                 # イベントをリセット（WAIT_FOR_BOT_SPEECH_STARTが完了した後の新しいイベントを待つ）
                 self.event_waiters["BOT_SPEECH_END"].clear()
                 try:
@@ -223,14 +270,18 @@ class Orchestrator:
                         self.event_waiters["BOT_SPEECH_END"].wait(),
                         timeout=15.0  # タイムアウトを15秒に延長
                     )
-                    logger.info("[Orchestrator] Bot speech ended!")
+                    logger.debug("[Orchestrator] Bot speech ended!")
                     # ボット発話終了後、少し待機してから次のアクションに進む（確実に終了を確認）
                     await asyncio.sleep(0.1)  # 100ms待機
                 except asyncio.TimeoutError:
                     logger.warning("[Orchestrator] Timeout waiting for bot speech end (15s)")
                     # タイムアウトしても続行
         
-        logger.info("[Orchestrator] Scenario execution completed")
+        # プログレスバーを閉じる
+        if pbar:
+            pbar.close()
+        
+        logger.info("[Orchestrator] シナリオ実行完了")
     
     def notify_event(self, event_type: str):
         """イベントを通知（VAD検出などから呼ばれる）"""
