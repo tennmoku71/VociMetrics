@@ -142,7 +142,8 @@ async def main():
             
             text_counter = 0
             for action in actions:
-                if action.action_type == "USER_SPEECH_START" and action.text and not action.audio_file:
+                # USER_SPEECH_STARTとUSER_INTERRUPTの両方でテキストをTTS変換
+                if (action.action_type == "USER_SPEECH_START" or action.action_type == "USER_INTERRUPT") and action.text and not action.audio_file:
                     # テキストをハッシュ化してファイル名に使用（同じテキストは再利用）
                     text_hash = hashlib.md5(action.text.encode('utf-8')).hexdigest()
                     audio_file_path = temp_audio_dir / f"tts_{text_counter}_{text_hash}.wav"
@@ -663,26 +664,47 @@ async def main():
                         
                         # Output organized by categories
                         logger.info("=" * 60)
-                        # turntake: Response Latency, User Speech Duration, Bot Speech Duration
+                        # turntake: Response Latency, Interrupt to Speech End, User Speech Duration, Bot Speech Duration
                         response_latency_ms = metrics.get('response_latency_ms')
                         response_latency_threshold = config.get('evaluation', {}).get('response_latency_threshold_ms', 800)
                         response_latency_ok = metrics.get('response_latency_ok', False)
+                        interrupt_to_end_ms = metrics.get('interrupt_to_speech_end_ms')
                         user_duration = metrics.get('user_speech_duration_ms')
                         bot_duration = metrics.get('bot_speech_duration_ms')
                         
+                        # turntakeスコアを計算（Response LatencyとInterrupt to Speech Endの両方を考慮）
+                        turntake_scores = []
+                        
                         if response_latency_ms is not None:
-                            # 100 points if within threshold, linear deduction if exceeds (0 points at 2x threshold)
+                            # Response Latencyのスコア
                             if response_latency_ok:
-                                turntake_score = 100.0
+                                turntake_scores.append(100.0)
                             else:
                                 # Linear deduction if exceeds threshold (0 points at 2x threshold)
-                                turntake_score = max(0.0, 100.0 * (1.0 - (response_latency_ms - response_latency_threshold) / response_latency_threshold))
+                                turntake_scores.append(max(0.0, 100.0 * (1.0 - (response_latency_ms - response_latency_threshold) / response_latency_threshold)))
+                        
+                        if interrupt_to_end_ms is not None:
+                            # Interrupt to Speech Endのスコア（閾値はResponse Latencyと同じ）
+                            interrupt_threshold = response_latency_threshold
+                            if interrupt_to_end_ms <= interrupt_threshold:
+                                turntake_scores.append(100.0)
+                            else:
+                                # Linear deduction if exceeds threshold (0 points at 2x threshold)
+                                turntake_scores.append(max(0.0, 100.0 * (1.0 - (interrupt_to_end_ms - interrupt_threshold) / interrupt_threshold)))
+                        
+                        if turntake_scores:
+                            turntake_score = sum(turntake_scores) / len(turntake_scores)
                             color = get_score_color(turntake_score)
                             logger.info(f"[turntake] {color}Score: {turntake_score:.1f}/100{RESET}")
-                            logger.info(f"  Response Latency: {response_latency_ms:.1f}ms {'✓' if response_latency_ok else '✗'}")
                         else:
                             logger.info(f"[turntake] Score: N/A")
-                            logger.info(f"  Response Latency: N/A")
+                        
+                        if response_latency_ms is not None:
+                            logger.info(f"  Response Latency: {response_latency_ms:.1f}ms {'✓' if response_latency_ok else '✗'}")
+                        
+                        # Interrupt to Speech End (informational only, not scored separately)
+                        if interrupt_to_end_ms is not None:
+                            logger.info(f"  Interrupt to Speech End: {interrupt_to_end_ms:.1f}ms")
                         
                         # User Speech Duration (informational only, not scored)
                         if user_duration is not None:

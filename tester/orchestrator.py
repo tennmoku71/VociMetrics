@@ -80,6 +80,13 @@ class UnifiedLogger:
         self.log_event({
             "type": "USER_SPEECH_END"
         })
+    
+    def log_user_interrupt_start(self, text: Optional[str] = None):
+        """ユーザー割り込み発話開始を記録"""
+        self.log_event({
+            "type": "USER_INTERRUPT_START",
+            "text": text
+        })
         
     def log_bot_speech_start(self, text: Optional[str] = None, vad_start_sample: Optional[int] = None):
         """ボット発話開始を記録
@@ -185,6 +192,8 @@ class Orchestrator:
         self.expected_texts: List[str] = []
         # 期待toolcall情報を保存
         self.expected_toolcalls: List[Dict[str, Any]] = []
+        # BOT_SPEECH_STARTが検出された時刻を記録（割り込み用）
+        self.bot_speech_start_time: Optional[float] = None
         
     async def run_test(self, test_id: str, test_type: str = "rule"):
         """テストを開始（ロガーを初期化）"""
@@ -260,6 +269,51 @@ class Orchestrator:
             elif action.action_type == "USER_SPEECH_END":
                 # ユーザー発話終了: ログに記録（音声送信はUSER_SPEECH_START内で完了している）
                 logger.debug("[Orchestrator] User speech ended")
+            
+            elif action.action_type == "USER_INTERRUPT":
+                # 割り込み発話: BOT_SPEECH_STARTからdelay_ms後に実行
+                logger.debug(f"[Orchestrator] Interrupt scheduled: delay={action.delay_ms}ms")
+                
+                # BOT_SPEECH_STARTが既に検出されているか確認
+                # 検出されていなければ待機
+                if not self.event_waiters["BOT_SPEECH_START"].is_set():
+                    logger.debug("[Orchestrator] Waiting for BOT_SPEECH_START before interrupt...")
+                    try:
+                        await asyncio.wait_for(
+                            self.event_waiters["BOT_SPEECH_START"].wait(),
+                            timeout=15.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[Orchestrator] Timeout waiting for BOT_SPEECH_START before interrupt (15s)")
+                        continue  # タイムアウトした場合はスキップ
+                
+                # BOT_SPEECH_STARTが検出された時点からdelay_ms経過するまで待機
+                if self.bot_speech_start_time is not None:
+                    current_time = asyncio.get_event_loop().time()
+                    elapsed_ms = (current_time - self.bot_speech_start_time) * 1000.0
+                    remaining_ms = action.delay_ms - elapsed_ms
+                    
+                    if remaining_ms > 0:
+                        logger.debug(f"[Orchestrator] Waiting {remaining_ms:.1f}ms from BOT_SPEECH_START (elapsed: {elapsed_ms:.1f}ms)")
+                        await asyncio.sleep(remaining_ms / 1000.0)
+                    else:
+                        logger.debug(f"[Orchestrator] Interrupt delay already passed (elapsed: {elapsed_ms:.1f}ms, delay: {action.delay_ms}ms)")
+                else:
+                    # bot_speech_start_timeが記録されていない場合は、delay_ms待機
+                    logger.warning("[Orchestrator] bot_speech_start_time not recorded, using simple delay")
+                    await asyncio.sleep(action.delay_ms / 1000.0)
+                
+                # 割り込み発話を送信
+                if audio_sender:
+                    if action.audio_file:
+                        logger.debug(f"[Orchestrator] Sending interrupt speech: {action.audio_file}")
+                        interrupt_text = action.text if action.text else f"Interrupt audio file: {action.audio_file}"
+                        self.logger.log_user_interrupt_start(text=interrupt_text)
+                        await audio_sender(action.audio_file)
+                        self.logger.log_user_speech_end()
+                        self.event_waiters["USER_SPEECH_END"].set()
+                    else:
+                        logger.warning("[Orchestrator] Interrupt action has no audio_file (TTS conversion should have been done)")
                     
             elif action.action_type == "WAIT_FOR_BOT_SPEECH_START":
                 # ボット発話開始を待機（VAD検出）
@@ -320,9 +374,6 @@ class Orchestrator:
                     logger.debug("[Orchestrator] Toolcall detected!")
                 except asyncio.TimeoutError:
                     logger.warning("[Orchestrator] Timeout waiting for toolcall (15s)")
-                    # タイムアウトしても続行  # 100ms待機
-                except asyncio.TimeoutError:
-                    logger.warning("[Orchestrator] Timeout waiting for bot speech end (15s)")
                     # タイムアウトしても続行
         
         # プログレスバーを閉じる
@@ -336,4 +387,7 @@ class Orchestrator:
         if event_type in self.event_waiters:
             self.event_waiters[event_type].set()
             logger.debug(f"[Orchestrator] Event notified: {event_type}")
+            # BOT_SPEECH_STARTが検出された時刻を記録（割り込み用）
+            if event_type == "BOT_SPEECH_START":
+                self.bot_speech_start_time = asyncio.get_event_loop().time()
 

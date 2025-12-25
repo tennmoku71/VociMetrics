@@ -293,6 +293,7 @@ class Evaluator:
             "think_time_ms": None,
             "user_speech_duration_ms": None,
             "bot_speech_duration_ms": None,
+            "interrupt_to_speech_end_ms": None,
             "toolcall_metrics": None
         }
         
@@ -356,6 +357,24 @@ class Evaluator:
                 if bot_speech_start_time is not None:
                     metrics["bot_speech_duration_ms"] = event.get("time") - bot_speech_start_time
                     break
+        
+        # Interrupt to Speech End: USER_INTERRUPT_STARTからBOT_SPEECH_ENDまでの時間
+        interrupt_start_times = [e.get("time", 0) for e in events if e.get("type") == "USER_INTERRUPT_START"]
+        bot_speech_ends = [e.get("time", 0) for e in events if e.get("type") == "BOT_SPEECH_END"]
+        
+        interrupt_to_end_latencies = []
+        bot_end_idx = 0
+        for interrupt_time in interrupt_start_times:
+            # 割り込みの後に来る最初のBOT_SPEECH_ENDを探す
+            for j in range(bot_end_idx, len(bot_speech_ends)):
+                if bot_speech_ends[j] > interrupt_time:
+                    latency = bot_speech_ends[j] - interrupt_time
+                    interrupt_to_end_latencies.append(latency)
+                    bot_end_idx = j + 1
+                    break
+        
+        if interrupt_to_end_latencies:
+            metrics["interrupt_to_speech_end_ms"] = sum(interrupt_to_end_latencies) / len(interrupt_to_end_latencies)
         
         # 閾値との比較
         response_latency_threshold = eval_config.get("response_latency_threshold_ms", 800)

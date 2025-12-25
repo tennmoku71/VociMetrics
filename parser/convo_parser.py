@@ -82,9 +82,10 @@ class ConvoParser:
         """.convoファイルをパースしてタスクキューを生成
         
         現時点での形式:
-        #me <audio_file_path>
-        #bot [speechStart]
-        #bot [speechEnd]
+        #me <audio_file_path> または #me <text>
+        #bot [speechStart] または #bot [speechEnd] または #bot <expected_text>
+        #toolcall <name> <arguments_json>
+        #interrupt <delay_ms> <text_or_audio_file>  # BOT_SPEECH_STARTからdelay_ms後に割り込み発話
         
         Args:
             convo_file: .convoファイルのパス
@@ -110,8 +111,8 @@ class ConvoParser:
         for line in lines:
             line = line.strip()
             
-            # コメント行をスキップ（#me, #bot, #toolcallは除外）
-            if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot") and not line.startswith("#toolcall"):
+            # コメント行をスキップ（#me, #bot, #toolcall, #interruptは除外）
+            if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot") and not line.startswith("#toolcall") and not line.startswith("#interrupt"):
                 continue
             
             # ユーザー発話: #me <audio_file_path> または #me <text>
@@ -213,6 +214,52 @@ class ConvoParser:
                     ))
                 else:
                     logger.warning(f"Invalid #toolcall line (missing name): {line}")
+            
+            # 割り込み発話: #interrupt <delay_ms> <text_or_audio_file>
+            elif line.startswith("#interrupt"):
+                parts = line.split(None, 2)
+                if len(parts) >= 3:
+                    try:
+                        delay_ms = int(parts[1].strip())
+                        content = parts[2].strip()
+                        
+                        # ファイルパスかテキストかを判定（#meと同じロジック）
+                        content_path = Path(content)
+                        has_extension = content_path.suffix.lower() in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']
+                        file_exists = content_path.exists()
+                        
+                        # scenarios_dirからの相対パスも確認
+                        if not file_exists and not content_path.is_absolute():
+                            relative_path = self.scenarios_dir.parent / content_path
+                            file_exists = relative_path.exists()
+                            if file_exists:
+                                content = str(relative_path)
+                        
+                        if has_extension or file_exists:
+                            # 音声ファイルパス
+                            actions.append(ScenarioAction(
+                                action_type="USER_INTERRUPT",
+                                speaker=Speaker.USER,
+                                audio_file=content,
+                                delay_ms=delay_ms
+                            ))
+                        else:
+                            # テキスト（TTSで変換する必要がある）
+                            actions.append(ScenarioAction(
+                                action_type="USER_INTERRUPT",
+                                speaker=Speaker.USER,
+                                text=content,
+                                delay_ms=delay_ms
+                            ))
+                        # 割り込み発話の終了も追加
+                        actions.append(ScenarioAction(
+                            action_type="USER_SPEECH_END",
+                            speaker=Speaker.USER
+                        ))
+                    except ValueError:
+                        logger.warning(f"Invalid delay_ms in #interrupt line: {parts[1]}")
+                else:
+                    logger.warning(f"Invalid #interrupt line (missing delay_ms or content): {line}")
         
         logger.debug(f"Parsed {len(actions)} actions from convo file")
         return actions
