@@ -156,8 +156,6 @@ async def websocket_handler(request):
     else:
         print("[INFO] VADモデルが正常にロードされました。")
     
-    # 受信した音声データを保存（デバッグ用）
-    received_audio_data = []
     start_time = asyncio.get_event_loop().time()
     
     # VAD用のバッファ（一定の長さのチャンクにまとめる）
@@ -307,13 +305,6 @@ async def websocket_handler(request):
             final_relative_time = final_time - start_time
             vad_detector.process_audio_frame(vad_buffer, final_relative_time)
         
-        # 受信した音声を保存（デバッグ用）
-        if received_audio_data:
-            all_received = np.concatenate(received_audio_data)
-            output_file = "server_received.wav"
-            sf.write(output_file, all_received.astype(np.float32) / 32767.0, input_sample_rate)
-            print(f"受信した音声を保存しました: {output_file}")
-    
     return ws
 
 
