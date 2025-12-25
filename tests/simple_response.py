@@ -212,10 +212,6 @@ async def websocket_handler(request):
                 # PCM形式（int16）を想定
                 audio_chunk = np.frombuffer(msg.data, dtype=np.int16)
                 
-                # デバッグログは削除（必要に応じて有効化）
-                
-                received_audio_data.append(audio_chunk)
-                
                 # リサンプリング用バッファに追加（24000Hz）
                 resample_buffer = np.concatenate([resample_buffer, audio_chunk])
                 
