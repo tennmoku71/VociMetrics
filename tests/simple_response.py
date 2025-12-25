@@ -23,10 +23,12 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+import json
 import numpy as np
 import soundfile as sf
 from aiohttp import web, WSMsgType
 from tester.vad_detector import VADDetector
+from evaluator.tts_engine import create_tts_engine
 
 # グローバル変数でシャットダウンフラグを管理
 shutdown_event = asyncio.Event()
@@ -53,6 +55,17 @@ async def websocket_handler(request):
     
     print("クライアントが接続しました")
     
+    # config.jsonを読み込んでTTSエンジンを初期化
+    config_path = project_root / "config.json"
+    tts_engine = None
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            tts_engine = create_tts_engine(config)
+        except Exception as e:
+            print(f"[WARNING] TTSエンジンの初期化に失敗しました: {e}")
+    
     # VAD検出器を初期化
     input_sample_rate = 24000  # WebSocketで受信する音声のサンプルレート（OpenAI Realtime API標準）
     vad_sample_rate = 16000  # webrtcvadが期待するサンプルレート
@@ -74,6 +87,25 @@ async def websocket_handler(request):
             if should_send_response and response_audio_chunks is None:
                 # 応答音声ファイルを読み込む
                 response_audio_file = "tests/response.wav"
+                
+                # 音声ファイルが存在しない場合、TTSで自動生成
+                if not os.path.exists(response_audio_file):
+                    if tts_engine:
+                        print(f"[TTS] 音声ファイルが見つかりません。TTSで自動生成します: {response_audio_file}")
+                        default_text = "はい、承知いたしました。"
+                        # ディレクトリが存在しない場合は作成
+                        os.makedirs(os.path.dirname(response_audio_file), exist_ok=True)
+                        if tts_engine.synthesize(default_text, response_audio_file):
+                            print(f"[TTS] 音声ファイルを生成しました: {response_audio_file}")
+                        else:
+                            print(f"[ERROR] TTSでの音声生成に失敗しました。無音を送信します。")
+                            should_send_response = False
+                            continue
+                    else:
+                        print(f"[WARNING] 音声ファイルが見つかりません: {response_audio_file} (TTSエンジンも利用できません)")
+                        should_send_response = False
+                        continue
+                
                 if os.path.exists(response_audio_file):
                     # 音声ファイルを読み込む
                     audio_data, sr = sf.read(response_audio_file)

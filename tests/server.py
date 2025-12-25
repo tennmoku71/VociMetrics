@@ -12,6 +12,12 @@ import soundfile as sf
 from aiohttp import web, WSMsgType
 from pathlib import Path
 
+# プロジェクトルートをパスに追加
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from evaluator.tts_engine import create_tts_engine
+
 # グローバル変数でシャットダウンフラグを管理
 shutdown_event = asyncio.Event()
 shutdown_requested = False
@@ -36,6 +42,17 @@ async def websocket_handler(request):
     await ws.prepare(request)
     
     print("クライアントが接続しました")
+    
+    # config.jsonを読み込んでTTSエンジンを初期化
+    config_path = project_root / "config.json"
+    tts_engine = None
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            tts_engine = create_tts_engine(config)
+        except Exception as e:
+            print(f"[WARNING] TTSエンジンの初期化に失敗しました: {e}")
     
     # 音声検出の状態管理
     audio_detected = False
@@ -126,6 +143,23 @@ async def websocket_handler(request):
                                     if not response_sent:
                                         response_sent = True
                                         response_audio_file = "tests/hello_48k.wav"
+                                        
+                                        # 音声ファイルが存在しない場合、TTSで自動生成
+                                        if not os.path.exists(response_audio_file):
+                                            if tts_engine:
+                                                print(f"[TTS] 音声ファイルが見つかりません。TTSで自動生成します: {response_audio_file}")
+                                                default_text = "こんにちは。"
+                                                # ディレクトリが存在しない場合は作成
+                                                os.makedirs(os.path.dirname(response_audio_file), exist_ok=True)
+                                                if tts_engine.synthesize(default_text, response_audio_file):
+                                                    print(f"[TTS] 音声ファイルを生成しました: {response_audio_file}")
+                                                else:
+                                                    print(f"[ERROR] TTSでの音声生成に失敗しました。")
+                                                    continue
+                                            else:
+                                                print(f"[WARNING] 音声ファイルが見つかりません: {response_audio_file} (TTSエンジンも利用できません)")
+                                                continue
+                                        
                                         if os.path.exists(response_audio_file):
                                             print(f"応答音声を送信します: {response_audio_file}")
                                             
