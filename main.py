@@ -9,6 +9,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from tester.orchestrator import Orchestrator
 from tester.vad_detector import VADDetector
 from evaluator.evaluator import Evaluator
@@ -344,10 +345,42 @@ async def main():
                                                 client_vad_timestamps["first_frame_processed"] = asyncio.get_event_loop().time()
                                 
                             elif msg.type == aiohttp.WSMsgType.TEXT:
-                                # テキストメッセージ（制御用）
+                                # テキストメッセージ（制御用・toolcall用）
                                 try:
                                     data = json.loads(msg.data)
-                                    logger.info(f"受信メッセージ: {data}")
+                                    msg_type = data.get("type")
+                                    
+                                    if msg_type == "toolcall":
+                                        # Toolcallメッセージを受信
+                                        toolcall_id = data.get("id", "unknown")
+                                        toolcall_name = data.get("name", "unknown")
+                                        toolcall_arguments = data.get("arguments", {})
+                                        
+                                        # タイムスタンプを計算
+                                        current_time = asyncio.get_event_loop().time()
+                                        relative_time = current_time - start_time
+                                        
+                                        # orchestratorに記録
+                                        orchestrator.logger.log_toolcall(
+                                            name=toolcall_name,
+                                            arguments=toolcall_arguments,
+                                            toolcall_id=toolcall_id
+                                        )
+                                        
+                                        # イベントを通知
+                                        orchestrator.notify_event("TOOLCALL")
+                                        
+                                        # ファイルログに出力（コンソールには出さない）
+                                        logger.debug(f"[Toolcall] 受信: {relative_time:.3f}s")
+                                        logger.debug(f"[Toolcall] ID: {toolcall_id}")
+                                        logger.debug(f"[Toolcall] Name: {toolcall_name}")
+                                        logger.debug(f"[Toolcall] Arguments: {json.dumps(toolcall_arguments, ensure_ascii=False)}")
+                                        logger.debug(f"[Toolcall] Full message: {json.dumps(data, ensure_ascii=False)}")
+                                        
+                                    else:
+                                        # その他のテキストメッセージ
+                                        logger.info(f"受信メッセージ: {data}")
+                                        
                                 except json.JSONDecodeError:
                                     logger.warning(f"無効なJSONメッセージ: {msg.data}")
                                     
@@ -368,6 +401,7 @@ async def main():
                 recorded_bot_audio = []  # 受信した音声（ボット音声）
                 recording_start_time = asyncio.get_event_loop().time()  # 録音開始時刻
                 recording_enabled = True  # 録音有効フラグ
+                recording_file_path: Optional[Path] = None  # 録音ファイルのパス
                 
                 async def audio_sender_task():
                     """音声送信タスク（常に動作し、デフォルトは無音、.convoに従って音声を送信）"""
@@ -493,6 +527,7 @@ async def main():
                     pass
                 
                 # 録音した音声を2チャンネル（ステレオ）WAVファイルとして保存
+                recording_file_path = None
                 if recorded_user_audio or recorded_bot_audio:
                     try:
                         # 録音データを結合
@@ -519,6 +554,7 @@ async def main():
                         output_dir.mkdir(parents=True, exist_ok=True)
                         output_file = output_dir / f"{test_id}_recording.wav"
                         sf.write(str(output_file), stereo_audio_float, input_sample_rate)
+                        recording_file_path = output_file
                         
                         logger.debug(f"録音を保存しました: {output_file}")
                         logger.debug(f"  左チャンネル（ユーザー音声）: {len(user_audio)/input_sample_rate:.2f}秒")
@@ -542,7 +578,7 @@ async def main():
                         )
                         
                         # 評価指標を計算
-                        metrics = evaluator.calculate_metrics(orchestrator.logger)
+                        metrics = evaluator.calculate_metrics(orchestrator.logger, orchestrator)
                         
                         # ANSIエスケープコード（色分け）
                         GREEN = '\033[92m'
@@ -564,7 +600,6 @@ async def main():
                         # Output organized by categories
                         logger.info("=" * 60)
                         # turntake: Response Latency, User Speech Duration, Bot Speech Duration
-                        logger.info("[turntake]")
                         response_latency_ms = metrics.get('response_latency_ms')
                         response_latency_threshold = config.get('evaluation', {}).get('response_latency_threshold_ms', 800)
                         response_latency_ok = metrics.get('response_latency_ok', False)
@@ -578,12 +613,12 @@ async def main():
                             else:
                                 # Linear deduction if exceeds threshold (0 points at 2x threshold)
                                 turntake_score = max(0.0, 100.0 * (1.0 - (response_latency_ms - response_latency_threshold) / response_latency_threshold))
-                            logger.info(f"  Response Latency: {response_latency_ms:.1f}ms {'✓' if response_latency_ok else '✗'}")
                             color = get_score_color(turntake_score)
-                            logger.info(f"  {color}Score: {turntake_score:.1f}/100{RESET}")
+                            logger.info(f"[turntake] {color}Score: {turntake_score:.1f}/100{RESET}")
+                            logger.info(f"  Response Latency: {response_latency_ms:.1f}ms {'✓' if response_latency_ok else '✗'}")
                         else:
+                            logger.info(f"[turntake] Score: N/A")
                             logger.info(f"  Response Latency: N/A")
-                            logger.info(f"  Score: N/A")
                         
                         # User Speech Duration (informational only, not scored)
                         if user_duration is not None:
@@ -594,17 +629,41 @@ async def main():
                             logger.info(f"  Bot Speech Duration: {bot_duration}ms")
                         
                         # sound: (empty for now)
-                        logger.info("[sound]")
-                        logger.info(f"  Score: N/A")
+                        logger.info("[sound] Score: N/A")
                         
-                        # toolcall: (empty for now)
-                        logger.info("[toolcall]")
-                        logger.info(f"  Score: N/A")
+                        # toolcall: Toolcall評価結果
+                        toolcall_metrics = metrics.get('toolcall_metrics')
+                        if toolcall_metrics:
+                            expected_count = toolcall_metrics.get('expected_count', 0)
+                            actual_count = toolcall_metrics.get('actual_count', 0)
+                            unexpected_count = toolcall_metrics.get('unexpected_count', 0)
+                            overall_score = toolcall_metrics.get('overall_score', 0.0)
+                            results = toolcall_metrics.get('results', [])
+                            
+                            color = get_score_color(overall_score)
+                            logger.info(f"[toolcall] {color}Score: {overall_score:.1f}/100{RESET}")
+                            logger.info(f"  Expected: {expected_count}, Actual: {actual_count}")
+                            if unexpected_count > 0:
+                                logger.info(f"  Unexpected: {unexpected_count}")
+                            for result in results:
+                                idx = result.get('index', 0) + 1
+                                name = result.get('expected_name', 'unknown')
+                                found = result.get('found', False)
+                                actual_count_item = result.get('actual_count', 0)
+                                count_match = result.get('count_match', False)
+                                latency_ms = result.get('latency_ms')
+                                args_match = result.get('arguments_match', False)
+                                score = result.get('score', 0.0) * 100.0
+                                
+                                latency_str = f"{latency_ms:.1f}ms" if latency_ms is not None else "N/A"
+                                logger.info(f"  Toolcall {idx} ({name}): {'✓' if found else '✗'} (count: {actual_count_item}, match: {'✓' if count_match else '✗'}, args: {'✓' if args_match else '✗'}, latency: {latency_str}, score: {score:.1f}/100)")
+                        else:
+                            logger.info("[toolcall] Score: N/A")
                         
                         # dialogue: Text comparison results
-                        logger.info("[dialogue]")
                         bot_texts = stt_results.get("bot_texts", [])
                         dialogue_scores = []
+                        match_results_list = []  # 比較結果を保存
                         if bot_texts and orchestrator.expected_texts:
                             # Compare for each BOT_SPEECH_START event
                             for i, expected_text in enumerate(orchestrator.expected_texts):
@@ -625,26 +684,32 @@ async def main():
                                         # Convert similarity score (0.0-1.0) to 100-point scale
                                         score_100 = match_result['score'] * 100.0
                                         dialogue_scores.append(score_100)
-                                        # Console shows only similarity score
-                                        logger.info(f"  Similarity score {i+1}: {match_result['score']:.3f} {'✓' if match_result['matched'] else '✗'}")
+                                        match_results_list.append((i+1, match_result, actual_text))
                                     else:
                                         logger.debug(f"  Expected text {i+1}: \"{expected_text}\"")
                                         logger.debug(f"  Actual text: (No STT result)")
                                         logger.debug(f"  Match: ✗")
-                                        logger.info(f"  Similarity score {i+1}: N/A ✗")
                                         dialogue_scores.append(0.0)
+                                        match_results_list.append((i+1, None, None))
                             
                             # Calculate average score
                             if dialogue_scores:
                                 dialogue_score = sum(dialogue_scores) / len(dialogue_scores)
                                 color = get_score_color(dialogue_score)
-                                logger.info(f"  {color}Score: {dialogue_score:.1f}/100{RESET}")
+                                # スコアを先に表示
+                                logger.info(f"[dialogue] {color}Score: {dialogue_score:.1f}/100{RESET}")
+                                # その後、詳細を表示
+                                for idx, match_result, actual_text in match_results_list:
+                                    if match_result:
+                                        logger.info(f"  Similarity score {idx}: {match_result['score']:.3f} {'✓' if match_result['matched'] else '✗'}")
+                                    else:
+                                        logger.info(f"  Similarity score {idx}: N/A ✗")
+                                dialogue_score = None
                             else:
-                                logger.info(f"  Score: N/A")
+                                logger.info("[dialogue] Score: N/A")
                                 dialogue_score = None
                         else:
-                            logger.info("  (No text comparison)")
-                            logger.info(f"  Score: N/A")
+                            logger.info("[dialogue] Score: N/A")
                             dialogue_score = None
                         
                         logger.info("=" * 60)
@@ -659,6 +724,8 @@ async def main():
         logger.info("Client completed successfully!")
         logger.info(f"Timeline saved to: {timeline_path}")
         logger.info(f"Log file: {log_filename}")
+        if recording_file_path:
+            logger.info(f"Recording file: {recording_file_path}")
         
     except Exception as e:
         logger.error(f"Error occurred: {e}", exc_info=True)

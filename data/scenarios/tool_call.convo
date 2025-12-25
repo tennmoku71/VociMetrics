@@ -1,0 +1,11 @@
+# IVE Test Scenario - Toolcall Test
+# toolcall機能をテストするシナリオ
+# サーバーが音声応答後にcall_staff toolcallを送信することを期待
+
+#me この商品について教えてください
+#bot 申し訳ございません。詳しい情報はスタッフにお尋ねください。
+
+#me すみません、詳しい説明が聞きたいです
+#bot 承知いたしました。スタッフにおつなぎいたします。
+#toolcall call_staff {"reason": "user_inquiry", "priority": "normal"}
+

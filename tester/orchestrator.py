@@ -96,6 +96,23 @@ class UnifiedLogger:
             event_data["vad_start_sample"] = vad_start_sample
         self.log_event(event_data)
         
+    def log_toolcall(self, name: str, arguments: Dict[str, Any], toolcall_id: Optional[str] = None):
+        """Toolcallを記録
+        
+        Args:
+            name: toolcall名
+            arguments: toolcall引数
+            toolcall_id: toolcall ID（オプション）
+        """
+        event_data = {
+            "type": "TOOLCALL",
+            "name": name,
+            "arguments": arguments
+        }
+        if toolcall_id:
+            event_data["toolcall_id"] = toolcall_id
+        self.log_event(event_data)
+    
     def log_bot_speech_end(self, vad_end_sample: Optional[int] = None):
         """ボット発話終了を記録
         
@@ -166,6 +183,8 @@ class Orchestrator:
         self.event_waiters: Dict[str, asyncio.Event] = {}
         # 期待テキストを保存（BOT_SPEECH_STARTイベントごとに）
         self.expected_texts: List[str] = []
+        # 期待toolcall情報を保存
+        self.expected_toolcalls: List[Dict[str, Any]] = []
         
     async def run_test(self, test_id: str, test_type: str = "rule"):
         """テストを開始（ロガーを初期化）"""
@@ -201,8 +220,12 @@ class Orchestrator:
         self.event_waiters = {
             "BOT_SPEECH_START": asyncio.Event(),
             "BOT_SPEECH_END": asyncio.Event(),
-            "USER_SPEECH_END": asyncio.Event()
+            "USER_SPEECH_END": asyncio.Event(),
+            "TOOLCALL": asyncio.Event()
         }
+        
+        # 期待されるtoolcall情報をリセット
+        self.expected_toolcalls = []
         
         # プログレスバーを初期化
         if TQDM_AVAILABLE:
@@ -272,7 +295,32 @@ class Orchestrator:
                     )
                     logger.debug("[Orchestrator] Bot speech ended!")
                     # ボット発話終了後、少し待機してから次のアクションに進む（確実に終了を確認）
-                    await asyncio.sleep(0.1)  # 100ms待機
+                    await asyncio.sleep(0.1)
+                except asyncio.TimeoutError:
+                    logger.warning("[Orchestrator] Timeout waiting for bot speech end (15s)")
+                    # タイムアウトしても続行
+            
+            elif action.action_type == "WAIT_FOR_TOOLCALL":
+                # Toolcallを待機
+                logger.debug(f"[Orchestrator] Waiting for toolcall: {action.toolcall_name}")
+                # 期待toolcall情報を保存
+                expected_toolcall = {
+                    "name": action.toolcall_name,
+                    "arguments": action.toolcall_arguments or {}
+                }
+                self.expected_toolcalls.append(expected_toolcall)
+                logger.debug(f"[Orchestrator] Expected toolcall: {expected_toolcall}")
+                # イベントをリセット
+                self.event_waiters["TOOLCALL"].clear()
+                try:
+                    await asyncio.wait_for(
+                        self.event_waiters["TOOLCALL"].wait(),
+                        timeout=15.0  # タイムアウトを15秒
+                    )
+                    logger.debug("[Orchestrator] Toolcall detected!")
+                except asyncio.TimeoutError:
+                    logger.warning("[Orchestrator] Timeout waiting for toolcall (15s)")
+                    # タイムアウトしても続行  # 100ms待機
                 except asyncio.TimeoutError:
                     logger.warning("[Orchestrator] Timeout waiting for bot speech end (15s)")
                     # タイムアウトしても続行

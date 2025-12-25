@@ -181,11 +181,16 @@ class Evaluator:
         
         return results
     
-    def calculate_metrics(self, logger_instance: UnifiedLogger) -> Dict[str, Any]:
+    def calculate_metrics(
+        self,
+        logger_instance: UnifiedLogger,
+        orchestrator_instance: Optional[Any] = None
+    ) -> Dict[str, Any]:
         """評価指標を計算
         
         Args:
             logger_instance: UnifiedLoggerインスタンス
+            orchestrator_instance: Orchestratorインスタンス（toolcall評価用）
             
         Returns:
             評価指標の辞書
@@ -194,11 +199,15 @@ class Evaluator:
             "response_latency_ms": None,
             "think_time_ms": None,
             "user_speech_duration_ms": None,
-            "bot_speech_duration_ms": None
+            "bot_speech_duration_ms": None,
+            "toolcall_metrics": None
         }
         
         events = logger_instance.events
         eval_config = self.config.get("evaluation", {})
+        
+        # Toolcall評価用の設定を取得
+        toolcall_latency_threshold_ms = eval_config.get("toolcall_latency_threshold_ms", 2000)
         
         # Response Latency: USER_SPEECH_ENDからBOT_SPEECH_STARTまでの時間（すべてのペアの平均）
         user_speech_ends = [e for e in events if e.get("type") == "USER_SPEECH_END"]
@@ -268,5 +277,179 @@ class Evaluator:
             metrics["think_time_ms"] <= think_time_threshold
         )
         
+        # Toolcall評価
+        if orchestrator_instance and hasattr(orchestrator_instance, 'expected_toolcalls'):
+            metrics["toolcall_metrics"] = self._evaluate_toolcalls(
+                events=events,
+                expected_toolcalls=orchestrator_instance.expected_toolcalls,
+                eval_config=eval_config
+            )
+        
         return metrics
+    
+    def _evaluate_toolcalls(
+        self,
+        events: List[Dict[str, Any]],
+        expected_toolcalls: List[Dict[str, Any]],
+        eval_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Toolcallを評価
+        
+        評価軸:
+        1. そもそも出るべきか、出ないべきか（期待されるtoolcallが送信されたか）
+        2. 回数は適切か（期待回数と実際の回数が一致するか）
+        3. argumentsは適切か（引数が一致するか）
+        
+        Args:
+            events: イベントリスト
+            expected_toolcalls: 期待されるtoolcallリスト
+            
+        Returns:
+            toolcall評価結果の辞書
+        """
+        # 実際に受信したtoolcallを取得
+        actual_toolcalls = [e for e in events if e.get("type") == "TOOLCALL"]
+        
+        # 評価結果
+        toolcall_results = []
+        total_score = 0.0
+        max_score = 0.0
+        
+        # 使用済みのtoolcallを追跡（各期待toolcallに対して1回だけ使用）
+        used_toolcall_indices = set()
+        
+        # 各期待toolcallを評価
+        for i, expected in enumerate(expected_toolcalls):
+            expected_name = expected.get("name")
+            expected_args = expected.get("arguments", {})
+            expected_count = 1  # 現時点では1回を期待
+            
+            # 対応する実際のtoolcallを探す（同じ名前で、まだ使用されていないもの）
+            matching_toolcall = None
+            matching_index = None
+            for j, tc in enumerate(actual_toolcalls):
+                if j in used_toolcall_indices:
+                    continue
+                if tc.get("name") == expected_name:
+                    matching_toolcall = tc
+                    matching_index = j
+                    break
+            
+            # 同じ名前のtoolcallが何回送信されたかカウント（使用済みを除く）
+            matching_count = sum(
+                1 for j, tc in enumerate(actual_toolcalls)
+                if j not in used_toolcall_indices and tc.get("name") == expected_name
+            )
+            
+            result = {
+                "index": i,
+                "expected_name": expected_name,
+                "expected_arguments": expected_args,
+                "expected_count": expected_count,
+                "found": matching_toolcall is not None,
+                "actual_count": matching_count,
+                "count_match": matching_count == expected_count,
+                "latency_ms": None,
+                "arguments_match": False,
+                "score": 0.0
+            }
+            
+            if matching_toolcall:
+                # 使用済みとしてマーク
+                used_toolcall_indices.add(matching_index)
+                
+                actual_args = matching_toolcall.get("arguments", {})
+                
+                # 引数の一致を確認
+                result["arguments_match"] = self._compare_toolcall_arguments(
+                    expected_args, actual_args
+                )
+                
+                # 直前のBOT_SPEECH_ENDからの遅延を計算
+                bot_speech_ends = [
+                    e for e in events
+                    if e.get("type") == "BOT_SPEECH_END"
+                    and e.get("time", 0) < matching_toolcall.get("time", 0)
+                ]
+                if bot_speech_ends:
+                    # 最も近いBOT_SPEECH_ENDを使用
+                    last_bot_end = max(bot_speech_ends, key=lambda e: e.get("time", 0))
+                    result["latency_ms"] = matching_toolcall.get("time", 0) - last_bot_end.get("time", 0)
+                
+                # スコア計算（各項目の重み付き）
+                score = 0.0
+                # 1. そもそも出るべきか、出ないべきか（送信されたか）: 30%
+                if result["found"]:
+                    score += 0.3
+                # 2. 回数は適切か（期待回数と実際の回数が一致するか）: 25%
+                if result["count_match"]:
+                    score += 0.25
+                # 3. argumentsは適切か（引数が一致するか）: 25%
+                if result["arguments_match"]:
+                    score += 0.25
+                # 4. latencyは適切か（直前の発話からの遅延が適切か）: 20%
+                if result["latency_ms"] is not None:
+                    # 遅延が2秒以内なら満点、それ以上は線形に減点（5秒で0点）
+                    if eval_config is None:
+                        eval_config = {}
+                    latency_threshold_ms = eval_config.get("toolcall_latency_threshold_ms", 2000)
+                    latency_max_ms = latency_threshold_ms * 2.5  # 5秒
+                    if result["latency_ms"] <= latency_threshold_ms:
+                        score += 0.2  # 2秒以内: 満点
+                    elif result["latency_ms"] <= latency_max_ms:
+                        # 2秒超5秒以内: 線形に減点
+                        penalty = 0.2 * ((result["latency_ms"] - latency_threshold_ms) / (latency_max_ms - latency_threshold_ms))
+                        score += max(0.0, 0.2 - penalty)
+                    # 5秒超: 0点
+                
+                result["score"] = score
+            else:
+                # toolcallが見つからない場合（送信されなかった）
+                result["score"] = 0.0
+            
+            toolcall_results.append(result)
+            total_score += result["score"]
+            max_score += 1.0
+        
+        # 余分なtoolcall（期待されていないもの）をカウント
+        unexpected_toolcalls = len(actual_toolcalls) - len(used_toolcall_indices)
+        
+        # 全体のスコア（余分なtoolcallがある場合は減点）
+        if max_score > 0:
+            base_score = (total_score / max_score * 100.0)
+            # 余分なtoolcallがある場合、1つにつき10%減点（最小0%）
+            penalty = min(unexpected_toolcalls * 10.0, base_score)
+            overall_score = max(0.0, base_score - penalty)
+        else:
+            overall_score = 0.0
+        
+        return {
+            "expected_count": len(expected_toolcalls),
+            "actual_count": len(actual_toolcalls),
+            "unexpected_count": unexpected_toolcalls,
+            "results": toolcall_results,
+            "overall_score": overall_score
+        }
+    
+    def _compare_toolcall_arguments(
+        self,
+        expected: Dict[str, Any],
+        actual: Dict[str, Any]
+    ) -> bool:
+        """Toolcall引数を比較
+        
+        Args:
+            expected: 期待される引数
+            actual: 実際の引数
+            
+        Returns:
+            一致するかどうか
+        """
+        # 期待される引数のすべてのキーが実際の引数に存在し、値が一致するか確認
+        for key, expected_value in expected.items():
+            if key not in actual:
+                return False
+            if actual[key] != expected_value:
+                return False
+        return True
 

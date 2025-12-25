@@ -25,7 +25,9 @@ class ScenarioAction:
         text: Optional[str] = None,
         audio_file: Optional[str] = None,
         wait_for: Optional[str] = None,
-        delay_ms: int = 0
+        delay_ms: int = 0,
+        toolcall_name: Optional[str] = None,
+        toolcall_arguments: Optional[Dict[str, Any]] = None
     ):
         """アクションを初期化
         
@@ -36,6 +38,8 @@ class ScenarioAction:
             audio_file: 音声ファイルパス（ルールテスト用）
             wait_for: 待機するイベントタイプ
             delay_ms: 遅延時間（ミリ秒）
+            toolcall_name: 期待されるtoolcall名
+            toolcall_arguments: 期待されるtoolcall引数
         """
         self.action_type = action_type
         self.speaker = speaker
@@ -43,6 +47,8 @@ class ScenarioAction:
         self.audio_file = audio_file
         self.wait_for = wait_for
         self.delay_ms = delay_ms
+        self.toolcall_name = toolcall_name
+        self.toolcall_arguments = toolcall_arguments
     
     def to_dict(self) -> Dict[str, Any]:
         """辞書形式に変換"""
@@ -58,6 +64,10 @@ class ScenarioAction:
             result["audio_file"] = self.audio_file
         if self.wait_for:
             result["wait_for"] = self.wait_for
+        if self.toolcall_name:
+            result["toolcall_name"] = self.toolcall_name
+        if self.toolcall_arguments:
+            result["toolcall_arguments"] = self.toolcall_arguments
         return result
 
 
@@ -100,8 +110,8 @@ class ConvoParser:
         for line in lines:
             line = line.strip()
             
-            # コメント行をスキップ
-            if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot"):
+            # コメント行をスキップ（#me, #bot, #toolcallは除外）
+            if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot") and not line.startswith("#toolcall"):
                 continue
             
             # ユーザー発話: #me <audio_file_path> または #me <text>
@@ -179,6 +189,30 @@ class ConvoParser:
                         ))
                 else:
                     logger.warning(f"Invalid #bot line (missing content): {line}")
+            
+            # Toolcall期待値: #toolcall <name> <arguments_json>
+            elif line.startswith("#toolcall"):
+                parts = line.split(None, 2)
+                if len(parts) >= 2:
+                    toolcall_name = parts[1].strip()
+                    toolcall_arguments = {}
+                    if len(parts) >= 3:
+                        # JSON形式の引数をパース
+                        try:
+                            import json
+                            toolcall_arguments = json.loads(parts[2].strip())
+                        except json.JSONDecodeError:
+                            logger.warning(f"Invalid JSON in toolcall arguments: {parts[2]}")
+                            toolcall_arguments = {}
+                    
+                    actions.append(ScenarioAction(
+                        action_type="WAIT_FOR_TOOLCALL",
+                        wait_for="TOOLCALL",
+                        toolcall_name=toolcall_name,
+                        toolcall_arguments=toolcall_arguments
+                    ))
+                else:
+                    logger.warning(f"Invalid #toolcall line (missing name): {line}")
         
         logger.debug(f"Parsed {len(actions)} actions from convo file")
         return actions
