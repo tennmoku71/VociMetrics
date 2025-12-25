@@ -7,6 +7,7 @@ from pathlib import Path
 
 from evaluator.stt_engine import STTEngine, create_stt_engine
 from evaluator.sound_evaluator import SoundEvaluator
+from evaluator.llm_evaluator import create_llm_conversation_evaluator
 from tester.orchestrator import UnifiedLogger
 from tester.vad_detector import VADDetector
 
@@ -44,6 +45,14 @@ class Evaluator:
         except Exception as e:
             logger.warning(f"[Evaluator] Failed to initialize sound evaluator: {e}. Sound評価機能は無効です。")
             self.sound_evaluator = None
+        
+        # LLM対話評価エンジンを初期化
+        try:
+            self.llm_conversation_evaluator = create_llm_conversation_evaluator(config)
+            logger.debug("[Evaluator] LLM conversation evaluator initialized")
+        except Exception as e:
+            logger.warning(f"[Evaluator] Failed to initialize LLM conversation evaluator: {e}. LLM対話評価機能は無効です。")
+            self.llm_conversation_evaluator = None
     
     def evaluate_recording(
         self,
@@ -564,4 +573,51 @@ class Evaluator:
             if actual[key] != expected_value:
                 return False
         return True
+    
+    def evaluate_conversation_quality(
+        self,
+        logger_instance: UnifiedLogger,
+        user_texts: List[Optional[str]],
+        bot_texts: List[Optional[str]]
+    ) -> Dict[str, Any]:
+        """LLMによる対話全体の品質評価
+        
+        Args:
+            logger_instance: UnifiedLoggerインスタンス（イベントリストを取得）
+            user_texts: ユーザー発話のテキストリスト（STT結果）
+            bot_texts: ボット発話のテキストリスト（STT結果）
+            
+        Returns:
+            評価結果の辞書:
+            {
+                "backchannel_score": float,  # 0.0-1.0
+                "tone_consistency_score": float,  # 0.0-1.0
+                "omotenashi_score": int,  # 1-5
+                "error": Optional[str]
+            }
+        """
+        if not self.llm_conversation_evaluator:
+            return {
+                "backchannel_score": None,
+                "tone_consistency_score": None,
+                "omotenashi_score": None,
+                "error": "LLM conversation evaluator not initialized"
+            }
+        
+        try:
+            events = logger_instance.events
+            result = self.llm_conversation_evaluator.evaluate_conversation(
+                events=events,
+                user_texts=user_texts,
+                bot_texts=bot_texts
+            )
+            return result
+        except Exception as e:
+            logger.error(f"[Evaluator] LLM対話評価エラー: {e}", exc_info=True)
+            return {
+                "backchannel_score": None,
+                "tone_consistency_score": None,
+                "omotenashi_score": None,
+                "error": str(e)
+            }
 

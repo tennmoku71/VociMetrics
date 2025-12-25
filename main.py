@@ -773,6 +773,18 @@ async def main():
                         
                         # dialogue: Text comparison results
                         bot_texts = stt_results.get("bot_texts", [])
+                        user_texts = []
+                        # ユーザー発話のテキストを取得（STT結果から）
+                        user_text = stt_results.get("user_text")
+                        if user_text:
+                            user_texts = [user_text]  # 現時点では1つのユーザー発話のみ
+                        else:
+                            # イベントから取得を試みる
+                            for event in orchestrator.logger.events:
+                                if event.get("type") == "USER_SPEECH_START":
+                                    text = event.get("text")
+                                    user_texts.append(text if text else None)
+                        
                         dialogue_scores = []
                         match_results_list = []  # 比較結果を保存
                         if bot_texts and orchestrator.expected_texts:
@@ -822,6 +834,40 @@ async def main():
                         else:
                             logger.info("[dialogue] Score: N/A")
                             dialogue_score = None
+                        
+                        # conversation_quality: LLMによる対話全体の評価
+                        conversation_quality = evaluator.evaluate_conversation_quality(
+                            logger_instance=orchestrator.logger,
+                            user_texts=user_texts,
+                            bot_texts=bot_texts
+                        )
+                        
+                        backchannel_score = conversation_quality.get("backchannel_score")
+                        tone_consistency_score = conversation_quality.get("tone_consistency_score")
+                        omotenashi_score = conversation_quality.get("omotenashi_score")
+                        conv_error = conversation_quality.get("error")
+                        
+                        if backchannel_score is not None and tone_consistency_score is not None and omotenashi_score is not None:
+                            # スコアを100点満点に変換（相槌・トーンは0-100、おもてなしは20-100）
+                            backchannel_score_100 = backchannel_score * 100.0
+                            tone_consistency_score_100 = tone_consistency_score * 100.0
+                            omotenashi_score_100 = (omotenashi_score - 1) * 25.0  # 1-5を0-100に変換（1→0, 2→25, 3→50, 4→75, 5→100）
+                            
+                            # 全体スコア（平均）
+                            conversation_score = (backchannel_score_100 + tone_consistency_score_100 + omotenashi_score_100) / 3.0
+                            color = get_score_color(conversation_score)
+                            logger.info(f"[conversation_quality] {color}Score: {conversation_score:.1f}/100{RESET}")
+                            
+                            logger.info(f"  Backchannel Score: {backchannel_score_100:.1f}/100")
+                            logger.info(f"  Tone Consistency Score: {tone_consistency_score_100:.1f}/100")
+                            logger.info(f"  Omotenashi Score: {omotenashi_score}/5 ({omotenashi_score_100:.1f}/100)")
+                            
+                            if conv_error:
+                                logger.debug(f"  Error: {conv_error}")
+                        else:
+                            logger.info("[conversation_quality] Score: N/A")
+                            if conv_error:
+                                logger.debug(f"  Error: {conv_error}")
                         
                         logger.info("=" * 60)
                         
