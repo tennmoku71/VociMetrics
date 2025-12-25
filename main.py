@@ -166,8 +166,9 @@ async def main():
                                 # PCM形式（int16）を想定
                                 audio_chunk = np.frombuffer(msg.data, dtype=np.int16)
                                 
-                                # 受信した音声を記録
-                                recorded_bot_audio.append(audio_chunk.copy())
+                                # 受信した音声を記録（録音が有効な場合のみ）
+                                if recording_enabled:
+                                    recorded_bot_audio.append(audio_chunk.copy())
                                 
                                 # 累積サンプル数を更新（24000Hz）
                                 chunk_samples = len(audio_chunk)
@@ -241,6 +242,7 @@ async def main():
                 recorded_user_audio = []  # 送信した音声（ユーザー音声）
                 recorded_bot_audio = []  # 受信した音声（ボット音声）
                 recording_start_time = asyncio.get_event_loop().time()  # 録音開始時刻
+                recording_enabled = True  # 録音有効フラグ
                 
                 async def audio_sender_task():
                     """音声送信タスク（常に動作し、デフォルトは無音、.convoに従って音声を送信）"""
@@ -256,8 +258,9 @@ async def main():
                             # 音声チャンクを送信
                             chunk = user_audio_chunks.pop(0)
                             await ws.send_bytes(chunk.tobytes())
-                            # 送信した音声を記録
-                            recorded_user_audio.append(chunk.copy())
+                            # 送信した音声を記録（録音が有効な場合のみ）
+                            if recording_enabled:
+                                recorded_user_audio.append(chunk.copy())
                             if len(user_audio_chunks) == 0:
                                 # すべての音声チャンクを送信完了
                                 user_audio_chunks = None
@@ -265,8 +268,9 @@ async def main():
                         else:
                             # 無音を送信（デフォルト）
                             await ws.send_bytes(silence_chunk.tobytes())
-                            # 無音も記録（タイミングを合わせるため）
-                            recorded_user_audio.append(silence_chunk.copy())
+                            # 無音も記録（タイミングを合わせるため、録音が有効な場合のみ）
+                            if recording_enabled:
+                                recorded_user_audio.append(silence_chunk.copy())
                         
                         await asyncio.sleep(chunk_duration)  # 10ms待機
                 
@@ -339,16 +343,12 @@ async def main():
                     audio_sender=send_audio_file
                 )
                 
-                # BOT_SPEECH_ENDを待機してから1秒余裕を持たせる
-                orchestrator.event_waiters["BOT_SPEECH_END"].clear()
-                try:
-                    await asyncio.wait_for(
-                        orchestrator.event_waiters["BOT_SPEECH_END"].wait(),
-                        timeout=15.0
-                    )
-                    await asyncio.sleep(1.0)  # 1秒待機
-                except asyncio.TimeoutError:
-                    await asyncio.sleep(1.0)  # タイムアウトしても1秒待機
+                # シナリオ実行完了後、1秒余裕を持たせてから終了
+                # （シナリオ内の最後のWAIT_FOR_BOT_SPEECH_ENDは既に完了している）
+                await asyncio.sleep(1.0)  # 1秒待機
+                
+                # 録音を停止
+                recording_enabled = False
                 
                 # ループフラグを無効化
                 valid_loop = False
