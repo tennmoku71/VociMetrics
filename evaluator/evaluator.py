@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 
 from evaluator.stt_engine import STTEngine, create_stt_engine
+from evaluator.sound_evaluator import SoundEvaluator
 from tester.orchestrator import UnifiedLogger
 from tester.vad_detector import VADDetector
 
@@ -35,6 +36,14 @@ class Evaluator:
             logger.debug(f"[Evaluator] STT engine initialized: {stt_config.get('engine', 'speechrecognition')}")
         except Exception as e:
             logger.warning(f"[Evaluator] Failed to initialize STT engine: {e}. STT機能は無効です。")
+        
+        # Sound評価エンジンを初期化
+        try:
+            self.sound_evaluator = SoundEvaluator(config)
+            logger.debug("[Evaluator] Sound evaluator initialized")
+        except Exception as e:
+            logger.warning(f"[Evaluator] Failed to initialize sound evaluator: {e}. Sound評価機能は無効です。")
+            self.sound_evaluator = None
     
     def evaluate_recording(
         self,
@@ -178,6 +187,90 @@ class Evaluator:
                 results["bot_texts"] = bot_texts  # 各イベントごとのテキストリスト
             except Exception as e:
                 logger.error(f"[Evaluator] 音声認識エラー: {e}", exc_info=True)
+        
+        # Sound評価を実行（ボット音声に対して）
+        if self.sound_evaluator and len(bot_audio) > 0:
+            try:
+                # VAD ON/OFF区間を取得
+                vad_on_samples = []
+                vad_off_samples = []
+                
+                # BOT_SPEECH_START/ENDイベントからVAD ON区間を取得
+                events = logger_instance.events
+                bot_speech_starts = [e for e in events if e.get("type") == "BOT_SPEECH_START"]
+                bot_speech_ends = [e for e in events if e.get("type") == "BOT_SPEECH_END"]
+                
+                # VAD ON区間を構築
+                for i, start_event in enumerate(bot_speech_starts):
+                    vad_start_sample = start_event.get("vad_start_sample")
+                    if vad_start_sample is not None:
+                        # 対応するENDイベントを探す
+                        vad_end_sample = None
+                        for j, end_event in enumerate(bot_speech_ends):
+                            if j >= i and end_event.get("vad_end_sample") is not None:
+                                vad_end_sample = end_event.get("vad_end_sample")
+                                break
+                        
+                        if vad_end_sample is None:
+                            vad_end_sample = len(bot_audio)
+                        
+                        vad_on_samples.append((vad_start_sample, vad_end_sample))
+                
+                # VAD OFF区間を構築（ON区間の間と前後）
+                if len(vad_on_samples) > 0:
+                    # 最初のON区間より前
+                    if vad_on_samples[0][0] > 0:
+                        vad_off_samples.append((0, vad_on_samples[0][0]))
+                    
+                    # ON区間の間
+                    for i in range(len(vad_on_samples) - 1):
+                        off_start = vad_on_samples[i][1]
+                        off_end = vad_on_samples[i + 1][0]
+                        if off_end > off_start:
+                            vad_off_samples.append((off_start, off_end))
+                    
+                    # 最後のON区間より後
+                    if vad_on_samples[-1][1] < len(bot_audio):
+                        vad_off_samples.append((vad_on_samples[-1][1], len(bot_audio)))
+                else:
+                    # ON区間がない場合は全体がOFF
+                    vad_off_samples.append((0, len(bot_audio)))
+                
+                # STT結果を準備（sound評価用）
+                stt_results_for_sound = []
+                for start_event in bot_speech_starts:
+                    text = start_event.get("text")
+                    if text:
+                        vad_start_sample = start_event.get("vad_start_sample")
+                        # 対応するENDイベントを探す
+                        vad_end_sample = None
+                        for end_event in bot_speech_ends:
+                            if end_event.get("vad_end_sample") is not None:
+                                vad_end_sample = end_event.get("vad_end_sample")
+                                break
+                        
+                        if vad_start_sample is not None:
+                            start_time = vad_start_sample / sample_rate
+                            end_time = (vad_end_sample / sample_rate) if vad_end_sample else None
+                            stt_results_for_sound.append({
+                                "text": text,
+                                "start_time": start_time,
+                                "end_time": end_time
+                            })
+                
+                # Sound評価を実行
+                sound_results = self.sound_evaluator.evaluate_sound(
+                    bot_audio=bot_audio,
+                    sample_rate=sample_rate,
+                    vad_on_samples=vad_on_samples,
+                    vad_off_samples=vad_off_samples,
+                    stt_results=stt_results_for_sound
+                )
+                results["sound_metrics"] = sound_results
+                logger.debug(f"[Evaluator] Sound評価完了: SNR={sound_results.get('snr', {}).get('snr_db')}dB, Score={sound_results.get('score'):.1f}")
+            except Exception as e:
+                logger.error(f"[Evaluator] Sound評価エラー: {e}", exc_info=True)
+                results["sound_metrics"] = None
         
         return results
     

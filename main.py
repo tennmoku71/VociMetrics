@@ -403,6 +403,66 @@ async def main():
                 recording_enabled = True  # 録音有効フラグ
                 recording_file_path: Optional[Path] = None  # 録音ファイルのパス
                 
+                # ホワイトノイズ設定を取得
+                sound_config = config.get("evaluation", {}).get("sound", {})
+                white_noise_config = sound_config.get("white_noise", {})
+                white_noise_enabled = white_noise_config.get("enabled", False)
+                white_noise_snr_db = white_noise_config.get("snr_db", 20.0)
+                # 無音時のノイズレベル（固定値、int16の最大値に対する比率）
+                # 例: 0.01 = 最大振幅の1%のノイズ
+                white_noise_background_level = white_noise_config.get("background_level", 0.01)
+                
+                if white_noise_enabled:
+                    logger.info(f"[White Noise] Enabled with SNR: {white_noise_snr_db}dB (background level: {white_noise_background_level})")
+                else:
+                    logger.debug("[White Noise] Disabled")
+                
+                # ホワイトノイズ生成関数
+                def add_white_noise(audio_chunk: np.ndarray, snr_db: float, is_silence: bool = False) -> np.ndarray:
+                    """音声チャンクにホワイトノイズを追加
+                    
+                    Args:
+                        audio_chunk: 音声チャンク（int16）
+                        snr_db: SNR（dB）、音声がある場合のSNR
+                        is_silence: 無音チャンクかどうか
+                    
+                    Returns:
+                        ノイズが追加された音声チャンク（int16）
+                    """
+                    if not white_noise_enabled:
+                        return audio_chunk
+                    
+                    # 背景ノイズを常に追加
+                    background_noise_amplitude = 32767.0 * white_noise_background_level
+                    background_noise = np.random.normal(0, background_noise_amplitude, len(audio_chunk))
+                    background_noise_int16 = np.clip(background_noise, -32768, 32767).astype(np.int16)
+                    
+                    if is_silence:
+                        # 無音の場合は背景ノイズのみ
+                        return background_noise_int16
+                    
+                    # 音声のパワーを計算（RMS）
+                    audio_power = np.mean(audio_chunk.astype(np.float32) ** 2)
+                    if audio_power == 0:
+                        # 無音の場合は背景ノイズのみ
+                        return background_noise_int16
+                    
+                    # SNRからノイズパワーを計算（音声に合わせたノイズ）
+                    # SNR = 10 * log10(signal_power / noise_power)
+                    # noise_power = signal_power / 10^(SNR/10)
+                    noise_power = audio_power / (10 ** (snr_db / 10.0))
+                    noise_amplitude = np.sqrt(noise_power)
+                    
+                    # 音声に合わせたホワイトノイズを生成（正規分布）
+                    signal_noise = np.random.normal(0, noise_amplitude, len(audio_chunk))
+                    signal_noise_int16 = np.clip(signal_noise, -32768, 32767).astype(np.int16)
+                    
+                    # 音声 + 音声に合わせたノイズ + 背景ノイズを追加（クリッピングを防ぐ）
+                    noisy_audio = audio_chunk.astype(np.int32) + signal_noise_int16.astype(np.int32) + background_noise_int16.astype(np.int32)
+                    noisy_audio = np.clip(noisy_audio, -32768, 32767).astype(np.int16)
+                    
+                    return noisy_audio
+                
                 async def audio_sender_task():
                     """音声送信タスク（常に動作し、デフォルトは無音、.convoに従って音声を送信）"""
                     chunk_size = int(input_sample_rate * 0.01)  # 10ms
@@ -416,20 +476,24 @@ async def main():
                         if user_audio_chunks and len(user_audio_chunks) > 0:
                             # 音声チャンクを送信
                             chunk = user_audio_chunks.pop(0)
-                            await ws.send_bytes(chunk.tobytes())
-                            # 送信した音声を記録（録音が有効な場合のみ）
+                            # ホワイトノイズを追加
+                            chunk_with_noise = add_white_noise(chunk, white_noise_snr_db)
+                            await ws.send_bytes(chunk_with_noise.tobytes())
+                            # 送信した音声を記録（録音が有効な場合のみ、実際に送信したノイズ付き音声を記録）
                             if recording_enabled:
-                                recorded_user_audio.append(chunk.copy())
+                                recorded_user_audio.append(chunk_with_noise.copy())
                             if len(user_audio_chunks) == 0:
                                 # すべての音声チャンクを送信完了
                                 user_audio_chunks = None
                                 audio_send_complete_event.set()  # 送信完了を通知
                         else:
                             # 無音を送信（デフォルト）
-                            await ws.send_bytes(silence_chunk.tobytes())
-                            # 無音も記録（タイミングを合わせるため、録音が有効な場合のみ）
+                            # ホワイトノイズを追加（常に入るタイプのノイズ）
+                            silence_with_noise = add_white_noise(silence_chunk, white_noise_snr_db, is_silence=True)
+                            await ws.send_bytes(silence_with_noise.tobytes())
+                            # 無音+ノイズも記録（タイミングを合わせるため、録音が有効な場合のみ）
                             if recording_enabled:
-                                recorded_user_audio.append(silence_chunk.copy())
+                                recorded_user_audio.append(silence_with_noise.copy())
                         
                         await asyncio.sleep(chunk_duration)  # 10ms待機
                 
@@ -628,8 +692,39 @@ async def main():
                         if bot_duration is not None:
                             logger.info(f"  Bot Speech Duration: {bot_duration}ms")
                         
-                        # sound: (empty for now)
-                        logger.info("[sound] Score: N/A")
+                        # sound: Sound評価結果
+                        sound_metrics = stt_results.get('sound_metrics')
+                        if sound_metrics:
+                            sound_score = sound_metrics.get('score', 0.0)
+                            color = get_score_color(sound_score)
+                            logger.info(f"[sound] {color}Score: {sound_score:.1f}/100{RESET}")
+                            
+                            # SNR
+                            snr = sound_metrics.get('snr', {})
+                            snr_db = snr.get('snr_db')
+                            if snr_db is not None:
+                                snr_ok = snr.get('snr_ok', False)
+                                logger.info(f"  SNR: {snr_db:.1f}dB {'✓' if snr_ok else '✗'}")
+                            
+                            # ノイズプロファイル
+                            noise_profile = sound_metrics.get('noise_profile', {})
+                            noise_type = noise_profile.get('noise_type', 'unknown')
+                            logger.info(f"  Noise Type: {noise_type}")
+                            
+                            # STT Confidence
+                            stt_conf = sound_metrics.get('stt_confidence', {})
+                            avg_conf = stt_conf.get('average_confidence')
+                            if avg_conf is not None:
+                                conf_ok = stt_conf.get('confidence_ok', False)
+                                logger.info(f"  STT Confidence: {avg_conf:.3f} {'✓' if conf_ok else '✗'}")
+                            
+                            # 幻聴率
+                            ftr = sound_metrics.get('false_trigger_rate', {})
+                            ftr_rate = ftr.get('false_trigger_rate', 0.0)
+                            ftr_ok = ftr.get('false_trigger_ok', False)
+                            logger.info(f"  False Trigger Rate: {ftr_rate:.3f} {'✓' if ftr_ok else '✗'}")
+                        else:
+                            logger.info("[sound] Score: N/A")
                         
                         # toolcall: Toolcall評価結果
                         toolcall_metrics = metrics.get('toolcall_metrics')
