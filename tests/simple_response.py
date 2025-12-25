@@ -63,10 +63,8 @@ async def websocket_handler(request):
             # 応答音声を送信する必要がある場合
             if should_send_response and response_audio_chunks is None:
                 # 応答音声ファイルを読み込む
-                response_audio_file = "tests/hello_48k.wav"
+                response_audio_file = "tests/response.wav"
                 if os.path.exists(response_audio_file):
-                    print(f"応答音声を送信します: {response_audio_file}")
-                    
                     # 音声ファイルを読み込む
                     audio_data, sr = sf.read(response_audio_file)
                     
@@ -83,9 +81,8 @@ async def websocket_handler(request):
                         if has_scipy:
                             num_samples = int(len(audio_data) * input_sample_rate / sr)
                             audio_data = signal.resample(audio_data, num_samples).astype(np.int16)
-                            print(f"サンプルレートを{sr}Hzから{input_sample_rate}Hzにリサンプリングしました")
                         else:
-                            print(f"[WARNING] scipyがインストールされていないため、リサンプリングをスキップします。")
+                            pass
                     
                     # 音声データをチャンクに分割
                     response_audio_chunks = []
@@ -99,7 +96,9 @@ async def websocket_handler(request):
                         response_audio_chunks.append(chunk)
                     
                     audio_duration = len(audio_data) / input_sample_rate
-                    print(f"応答音声送信を開始します（音声: {audio_duration:.2f}秒）")
+                    current_time = asyncio.get_event_loop().time()
+                    relative_time = current_time - start_time
+                    print(f"[応答] 音声送信開始: {relative_time:.3f}s (音声: {audio_duration:.2f}秒)")
                     should_send_response = False  # フラグをリセット
             
             # 応答音声チャンクがある場合は音声を送信、ない場合は無音を送信
@@ -109,7 +108,9 @@ async def websocket_handler(request):
                 await ws.send_bytes(chunk.tobytes())
                 if len(response_audio_chunks) == 0:
                     # すべての音声チャンクを送信完了
-                    print("応答音声の送信が完了しました")
+                    current_time = asyncio.get_event_loop().time()
+                    relative_time = current_time - start_time
+                    print(f"[応答] 音声送信終了: {relative_time:.3f}s")
                     response_audio_chunks = None
             else:
                 # 無音を送信（デフォルト）
@@ -120,19 +121,31 @@ async def websocket_handler(request):
     # VAD検出のコールバック
     def on_speech_start(timestamp: float):
         """音声開始を検出（立ち上がり）"""
-        print(f"[VAD] 立ち上がり: {timestamp:.3f}s")
+        current_time = asyncio.get_event_loop().time()
+        relative_time = current_time - start_time
+        print(f"[VAD] 立ち上がり: {timestamp:.3f}s (現在時刻: {relative_time:.3f}s)")
     
     def on_speech_end(timestamp: float):
         """音声終了を検出（立ち下がり）"""
-        nonlocal should_send_response
-        print(f"[VAD] 立ち下がり: {timestamp:.3f}s")
+        nonlocal should_send_response, response_audio_chunks
+        current_time = asyncio.get_event_loop().time()
+        relative_time = current_time - start_time
+        # VADのis_speaking状態を確認（Falseの時のみ応答を開始）
+        if vad_detector.is_speaking:
+            print(f"[VAD] 立ち下がり: {timestamp:.3f}s (現在時刻: {relative_time:.3f}s, is_speaking=Trueのため無視)")
+            return
+        # 応答音声送信中は無視
+        if response_audio_chunks is not None and len(response_audio_chunks) > 0:
+            print(f"[VAD] 立ち下がり: {timestamp:.3f}s (現在時刻: {relative_time:.3f}s, 応答送信中のため無視)")
+            return
+        print(f"[VAD] 立ち下がり: {timestamp:.3f}s (現在時刻: {relative_time:.3f}s, is_speaking=False、応答開始)")
         should_send_response = True
     
     vad_detector = VADDetector(
         sample_rate=vad_sample_rate,  # 16000Hzで初期化
-        threshold=0.2,  # 閾値をさらに下げる（0.3 → 0.2）
-        min_speech_duration_ms=250,
-        min_silence_duration_ms=100,
+        threshold=1.0,  # 閾値を高くして、より厳格に検出
+        min_speech_duration_ms=300,  # 最小音声継続時間を長くして、短いノイズを無視
+        min_silence_duration_ms=300,  # 無音継続時間を長くして、途中の無音で誤検出しないようにする
         on_speech_start=on_speech_start,
         on_speech_end=on_speech_end
     )

@@ -192,12 +192,17 @@ class Orchestrator:
                     await audio_sender(action.audio_file)
                     self.logger.log_user_speech_end()
                     self.event_waiters["USER_SPEECH_END"].set()
+            
+            elif action.action_type == "USER_SPEECH_END":
+                # ユーザー発話終了: ログに記録（音声送信はUSER_SPEECH_START内で完了している）
+                logger.info("[Orchestrator] User speech ended")
                     
             elif action.action_type == "WAIT_FOR_BOT_SPEECH_START":
                 # ボット発話開始を待機（VAD検出）
                 logger.info(f"[Orchestrator] Waiting for bot speech start...")
-                # イベントをリセット
+                # イベントをリセット（過去のイベントをクリア）
                 self.event_waiters["BOT_SPEECH_START"].clear()
+                self.event_waiters["BOT_SPEECH_END"].clear()  # BOT_SPEECH_ENDもクリア（過去のイベントを無視）
                 try:
                     await asyncio.wait_for(
                         self.event_waiters["BOT_SPEECH_START"].wait(),
@@ -211,7 +216,7 @@ class Orchestrator:
             elif action.action_type == "WAIT_FOR_BOT_SPEECH_END":
                 # ボット発話終了を待機（VAD検出）
                 logger.info("[Orchestrator] Waiting for bot speech end...")
-                # イベントをリセット
+                # イベントをリセット（WAIT_FOR_BOT_SPEECH_STARTが完了した後の新しいイベントを待つ）
                 self.event_waiters["BOT_SPEECH_END"].clear()
                 try:
                     await asyncio.wait_for(
@@ -219,6 +224,8 @@ class Orchestrator:
                         timeout=15.0  # タイムアウトを15秒に延長
                     )
                     logger.info("[Orchestrator] Bot speech ended!")
+                    # ボット発話終了後、少し待機してから次のアクションに進む（確実に終了を確認）
+                    await asyncio.sleep(0.1)  # 100ms待機
                 except asyncio.TimeoutError:
                     logger.warning("[Orchestrator] Timeout waiting for bot speech end (15s)")
                     # タイムアウトしても続行

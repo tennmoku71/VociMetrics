@@ -124,9 +124,9 @@ async def main():
         # VAD検出器を初期化
         vad_detector = VADDetector(
             sample_rate=vad_sample_rate,  # 16000Hzで初期化
-            threshold=0.5,
-            min_speech_duration_ms=250,
-            min_silence_duration_ms=100,
+            threshold=1.0,  # 閾値を高くして、より厳格に検出
+            min_speech_duration_ms=300,  # 最小音声継続時間を長くして、短いノイズを無視
+            min_silence_duration_ms=300,  # 無音継続時間を長くして、途中の無音で誤検出しないようにする
             on_speech_start=on_bot_speech_start,
             on_speech_end=on_bot_speech_end
         )
@@ -143,10 +143,13 @@ async def main():
                 # サーバーからの音声を受信してVADで処理するタスク
                 async def receive_audio():
                     """サーバーからの音声を受信してVADで処理"""
-                    start_time = asyncio.get_event_loop().time()
+                    # orchestratorのstart_timeと統一
+                    start_time = orchestrator.logger.start_time
                     # VAD用のバッファ（リサンプリング用）
                     vad_buffer = np.array([], dtype=np.int16)
                     vad_chunk_size = 320  # 16000Hzで20ms = 320サンプル
+                    # 累積サンプル数（24000Hz）を追跡してタイムスタンプを計算
+                    total_samples_received = 0
                     
                     # scipyのインポート（リサンプリング用）
                     try:
@@ -163,6 +166,13 @@ async def main():
                                 # PCM形式（int16）を想定
                                 audio_chunk = np.frombuffer(msg.data, dtype=np.int16)
                                 
+                                # 受信した音声を記録
+                                recorded_bot_audio.append(audio_chunk.copy())
+                                
+                                # 累積サンプル数を更新（24000Hz）
+                                chunk_samples = len(audio_chunk)
+                                total_samples_received += chunk_samples
+                                
                                 # VADバッファに追加（24000Hz）
                                 vad_buffer = np.concatenate([vad_buffer, audio_chunk])
                                 
@@ -175,16 +185,22 @@ async def main():
                                     resampled_chunk = signal.resample(vad_buffer, num_output_samples).astype(np.int16)
                                     
                                     # VADバッファが一定の長さに達したら処理
+                                    processed_samples = 0  # 処理したサンプル数（16000Hz）
                                     while len(resampled_chunk) >= vad_chunk_size:
                                         vad_chunk = resampled_chunk[:vad_chunk_size]
                                         resampled_chunk = resampled_chunk[vad_chunk_size:]
                                         
-                                        # タイムスタンプを計算（相対時間）
-                                        current_time = asyncio.get_event_loop().time()
-                                        relative_time = current_time - start_time
+                                        # タイムスタンプを計算（累積サンプル数から）
+                                        # 処理済みサンプル数（24000Hz）を計算
+                                        processed_samples_24k = int(processed_samples * input_sample_rate / vad_sample_rate)
+                                        # このチャンクの開始時刻（24000Hzでの累積サンプル数から）
+                                        chunk_start_samples_24k = total_samples_received - len(vad_buffer) + processed_samples_24k
+                                        timestamp = chunk_start_samples_24k / input_sample_rate
                                         
                                         # VADで処理
-                                        vad_detector.process_audio_frame(vad_chunk, relative_time)
+                                        vad_detector.process_audio_frame(vad_chunk, timestamp)
+                                        
+                                        processed_samples += vad_chunk_size
                                     
                                     # 残りのデータを保持
                                     vad_buffer = resampled_chunk.astype(np.int16) if len(resampled_chunk) > 0 else np.array([], dtype=np.int16)
@@ -194,12 +210,12 @@ async def main():
                                         vad_chunk = vad_buffer[:vad_chunk_size]
                                         vad_buffer = vad_buffer[vad_chunk_size:]
                                         
-                                        # タイムスタンプを計算（相対時間）
-                                        current_time = asyncio.get_event_loop().time()
-                                        relative_time = current_time - start_time
+                                        # タイムスタンプを計算（累積サンプル数から）
+                                        chunk_start_samples_24k = total_samples_received - len(vad_buffer)
+                                        timestamp = chunk_start_samples_24k / input_sample_rate
                                         
                                         # VADで処理
-                                        vad_detector.process_audio_frame(vad_chunk, relative_time)
+                                        vad_detector.process_audio_frame(vad_chunk, timestamp)
                                 
                             elif msg.type == aiohttp.WSMsgType.TEXT:
                                 # テキストメッセージ（制御用）
@@ -214,12 +230,17 @@ async def main():
                                 break
                                 
                     except Exception as e:
-                        logger.info(f"[VAD] Audio reception ended: {e}")
+                        pass
                 
                 # 音声送信用の変数
                 user_audio_chunks = None  # 送信する音声チャンク（.convoファイルに従って設定される）
                 audio_send_complete_event = asyncio.Event()  # 音声送信完了を通知するイベント
                 valid_loop = True  # ループ継続フラグ
+                
+                # 音声録音用のバッファ
+                recorded_user_audio = []  # 送信した音声（ユーザー音声）
+                recorded_bot_audio = []  # 受信した音声（ボット音声）
+                recording_start_time = asyncio.get_event_loop().time()  # 録音開始時刻
                 
                 async def audio_sender_task():
                     """音声送信タスク（常に動作し、デフォルトは無音、.convoに従って音声を送信）"""
@@ -235,14 +256,17 @@ async def main():
                             # 音声チャンクを送信
                             chunk = user_audio_chunks.pop(0)
                             await ws.send_bytes(chunk.tobytes())
+                            # 送信した音声を記録
+                            recorded_user_audio.append(chunk.copy())
                             if len(user_audio_chunks) == 0:
                                 # すべての音声チャンクを送信完了
-                                logger.info("音声送信が完了しました")
                                 user_audio_chunks = None
                                 audio_send_complete_event.set()  # 送信完了を通知
                         else:
                             # 無音を送信（デフォルト）
                             await ws.send_bytes(silence_chunk.tobytes())
+                            # 無音も記録（タイミングを合わせるため）
+                            recorded_user_audio.append(silence_chunk.copy())
                         
                         await asyncio.sleep(chunk_duration)  # 10ms待機
                 
@@ -315,6 +339,17 @@ async def main():
                     audio_sender=send_audio_file
                 )
                 
+                # BOT_SPEECH_ENDを待機してから1秒余裕を持たせる
+                orchestrator.event_waiters["BOT_SPEECH_END"].clear()
+                try:
+                    await asyncio.wait_for(
+                        orchestrator.event_waiters["BOT_SPEECH_END"].wait(),
+                        timeout=15.0
+                    )
+                    await asyncio.sleep(1.0)  # 1秒待機
+                except asyncio.TimeoutError:
+                    await asyncio.sleep(1.0)  # タイムアウトしても1秒待機
+                
                 # ループフラグを無効化
                 valid_loop = False
                 
@@ -332,7 +367,40 @@ async def main():
                 except asyncio.CancelledError:
                     pass
                 
-                logger.info("WebSocket接続を閉じます...")
+                # 録音した音声を2チャンネル（ステレオ）WAVファイルとして保存
+                if recorded_user_audio or recorded_bot_audio:
+                    try:
+                        # 録音データを結合
+                        user_audio = np.concatenate(recorded_user_audio) if recorded_user_audio else np.array([], dtype=np.int16)
+                        bot_audio = np.concatenate(recorded_bot_audio) if recorded_bot_audio else np.array([], dtype=np.int16)
+                        
+                        # 長さを揃える（短い方に無音を追加）
+                        max_length = max(len(user_audio), len(bot_audio))
+                        if len(user_audio) < max_length:
+                            silence_padding = np.zeros(max_length - len(user_audio), dtype=np.int16)
+                            user_audio = np.concatenate([user_audio, silence_padding])
+                        if len(bot_audio) < max_length:
+                            silence_padding = np.zeros(max_length - len(bot_audio), dtype=np.int16)
+                            bot_audio = np.concatenate([bot_audio, silence_padding])
+                        
+                        # 2チャンネル（ステレオ）に結合: 左チャンネル=ユーザー音声、右チャンネル=ボット音声
+                        stereo_audio = np.column_stack([user_audio, bot_audio])
+                        
+                        # float32形式に変換（-1.0～1.0の範囲）
+                        stereo_audio_float = stereo_audio.astype(np.float32) / 32767.0
+                        
+                        # WAVファイルとして保存
+                        output_dir = Path(config.get("logging", {}).get("output_dir", "data/reports"))
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        output_file = output_dir / f"{test_id}_recording.wav"
+                        sf.write(str(output_file), stereo_audio_float, input_sample_rate)
+                        
+                        logger.info(f"録音を保存しました: {output_file}")
+                        logger.info(f"  左チャンネル（ユーザー音声）: {len(user_audio)/input_sample_rate:.2f}秒")
+                        logger.info(f"  右チャンネル（ボット音声）: {len(bot_audio)/input_sample_rate:.2f}秒")
+                        
+                    except Exception as e:
+                        logger.error(f"録音の保存エラー: {e}", exc_info=True)
         
         # タイムラインを保存
         timeline_path = orchestrator.logger.save_timeline()
