@@ -717,12 +717,6 @@ async def main():
                             if avg_conf is not None:
                                 conf_ok = stt_conf.get('confidence_ok', False)
                                 logger.info(f"  STT Confidence: {avg_conf:.3f} {'✓' if conf_ok else '✗'}")
-                            
-                            # 幻聴率
-                            ftr = sound_metrics.get('false_trigger_rate', {})
-                            ftr_rate = ftr.get('false_trigger_rate', 0.0)
-                            ftr_ok = ftr.get('false_trigger_ok', False)
-                            logger.info(f"  False Trigger Rate: {ftr_rate:.3f} {'✓' if ftr_ok else '✗'}")
                         else:
                             logger.info("[sound] Score: N/A")
                         
