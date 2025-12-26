@@ -426,34 +426,6 @@ After evaluation execution, the following files are generated in the `reports/` 
 - **Tone Consistency Score**: Consistency of tone before/after interruptions or API calls (0.0-1.0)
 - **Omotenashi Score**: Overall "comfort" score (1-5 integer)
 
-## Directory Structure
-
-```
-vocimetrics/
-├── evaluator/              # Evaluation engines
-│   ├── evaluator.py       # Main evaluation orchestrator
-│   ├── llm_evaluator.py   # LLM-based conversation evaluation
-│   ├── sound_evaluator.py # Sound quality evaluation
-│   ├── stt_engine.py      # STT engine abstraction
-│   ├── text_matcher.py    # Text comparison engine
-│   └── tts_engine.py      # TTS engine abstraction
-├── parser/                # Parsers
-│   └── convo_parser.py    # .convo file parser
-├── tester/                # Test execution
-│   ├── orchestrator.py    # Scenario orchestrator
-│   └── vad_detector.py    # Voice Activity Detection
-├── tests/                 # Test servers (mock dialogue systems)
-│   ├── simple_response.py # Simple response server
-│   ├── tool_call.py       # Toolcall-enabled server
-│   └── server.py          # Basic server
-├── scenarios/             # Scenario files (.convo)
-├── reports/               # Evaluation results (gitignored)
-├── config.json            # Main configuration file
-├── config_options.json    # GUI field definitions
-├── gui.py                 # Streamlit GUI application
-└── main.py               # Main entry point
-```
-
 ## Configuration
 
 ### Key Settings
@@ -501,6 +473,3 @@ For detailed configuration options, see `config.json` and `config_options.json` 
 - Check API quota and rate limits
 - Ensure model name is correct (e.g., `gpt-4o-mini`)
 
-## License
-
-(Add license information here)
