@@ -1,0 +1,75 @@
+{
+  "webrtc": {
+    "ice_servers": [
+      {
+        "urls": [
+          "stun:stun.l.google.com:19302"
+        ]
+      }
+    ],
+    "audio_codec": "opus",
+    "sample_rate": 16000
+  },
+  "websocket": {
+    "server_url": "ws://localhost:8765/ws",
+    "sample_rate": 24000
+  },
+  "api_mock": {
+    "host": "localhost",
+    "port": 8888
+  },
+  "evaluation": {
+    "response_latency_threshold_ms": 800,
+    "toolcall_latency_threshold_ms": 2000,
+    "sound": {
+      "white_noise": {
+        "enabled": true,
+        "snr_db": 10.0,
+        "background_noise": {
+          "enabled": true,
+          "level": 0.005
+        }
+      },
+      "snr_threshold_db": 15.0,
+      "false_trigger_threshold": 0.1
+    }
+  },
+  "logging": {
+    "level": "INFO",
+    "output_dir": "reports"
+  },
+  "scenarios_dir": "scenarios",
+  "stt": {
+    "engine": "speechrecognition",
+    "language": "ja-JP",
+    "vosk_model_path": null
+  },
+  "tts": {
+    "engine": "gtts",
+    "language": "ja",
+    "sample_rate": 24000
+  },
+  "text_matching": {
+    "match_method": "llm",
+    "edit_distance_threshold": 0.8,
+    "llm": {
+      "model": "gpt-4o-mini",
+      "temperature": 0.0,
+      "similarity_threshold": 0.7,
+      "system_prompt": "あなたは対話システムの応答品質を評価する専門家です。期待される応答例と実際の応答を比較し、実際の応答が期待される応答として自然で適切かを0.0から1.0のスコアで評価してください。スコアは、実際の応答が期待される応答としてどれだけ自然で適切かを表します。\n- 1.0: 期待される応答として完全に自然で適切\n- 0.8以上: 期待される応答としてほぼ自然で適切（細かい表現の違いは許容）\n- 0.6-0.8: 期待される応答として概ね適切だが一部改善の余地がある\n- 0.4-0.6: 期待される応答として部分的に適切だが不自然な部分がある\n- 0.0-0.4: 期待される応答として不自然または不適切",
+      "user_prompt_template": "以下の期待される応答例と実際の応答を比較し、実際の応答が期待される応答として自然で適切かを評価してください。\n\n期待される応答例: {expected_text}\n実際の応答: {actual_text}\n\nJSON形式でスコアを返してください。"
+    }
+  },
+  "conversation_llm": {
+    "model": "gpt-4o-mini",
+    "temperature": 0.0,
+    "system_prompt": "あなたは対話システムのUX品質を評価する専門家です。一連の対話を分析し、以下の観点から評価してください。\n\n1. 相槌・フィラーの適切さ: 文脈を無視した不自然な相槌や、不要な発話停止（ノイズへの過剰反応）がないかを評価します。\n2. トーンの一貫性: 割り込み前後やAPI実行前後で、声のトーンやキャラ設定が崩れていないかを評価します。\n3. おもてなしスコア: 総合的な「対話の心地よさ」を5段階で評価します。",
+    "user_prompt_template": "以下の対話ログを分析し、評価してください。\n\n【対話ログ】\n{conversation_log}\n\nJSON形式で以下の評価を返してください：\n- backchannel_score: 相槌・フィラーの適切さ（0.0-1.0）\n- tone_consistency_score: トーンの一貫性（0.0-1.0）\n- omotenashi_score: おもてなしスコア（1-5の整数）"
+  },
+  "openai": {
+    "api_key": "",
+    "api_base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  }
+}
+
