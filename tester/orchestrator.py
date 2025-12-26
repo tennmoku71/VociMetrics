@@ -270,6 +270,12 @@ class Orchestrator:
                 # ユーザー発話終了: ログに記録（音声送信はUSER_SPEECH_START内で完了している）
                 logger.debug("[Orchestrator] User speech ended")
             
+            elif action.action_type == "SLEEP":
+                # 待機: delay_msで指定された時間だけ待機
+                if action.delay_ms > 0:
+                    logger.debug(f"[Orchestrator] Sleeping for {action.delay_ms}ms")
+                    await asyncio.sleep(action.delay_ms / 1000.0)
+            
             elif action.action_type == "USER_INTERRUPT":
                 # 割り込み発話: BOT_SPEECH_STARTからdelay_ms後に実行
                 logger.debug(f"[Orchestrator] Interrupt scheduled: delay={action.delay_ms}ms")
@@ -281,10 +287,10 @@ class Orchestrator:
                     try:
                         await asyncio.wait_for(
                             self.event_waiters["BOT_SPEECH_START"].wait(),
-                            timeout=15.0
+                            timeout=5.0
                         )
                     except asyncio.TimeoutError:
-                        logger.warning("[Orchestrator] Timeout waiting for BOT_SPEECH_START before interrupt (15s)")
+                        logger.warning("[Orchestrator] Timeout waiting for BOT_SPEECH_START before interrupt (5s)")
                         continue  # タイムアウトした場合はスキップ
                 
                 # BOT_SPEECH_STARTが検出された時点からdelay_ms経過するまで待機
@@ -330,11 +336,11 @@ class Orchestrator:
                 try:
                     await asyncio.wait_for(
                         self.event_waiters["BOT_SPEECH_START"].wait(),
-                        timeout=15.0  # タイムアウトを15秒に延長
+                        timeout=5.0
                     )
                     logger.debug("[Orchestrator] Bot speech detected!")
                 except asyncio.TimeoutError:
-                    logger.warning("[Orchestrator] Timeout waiting for bot speech start (15s)")
+                    logger.warning("[Orchestrator] Timeout waiting for bot speech start (5s)")
                     # タイムアウトしても続行
                     
             elif action.action_type == "WAIT_FOR_BOT_SPEECH_END":
@@ -345,13 +351,13 @@ class Orchestrator:
                 try:
                     await asyncio.wait_for(
                         self.event_waiters["BOT_SPEECH_END"].wait(),
-                        timeout=15.0  # タイムアウトを15秒に延長
+                        timeout=5.0
                     )
                     logger.debug("[Orchestrator] Bot speech ended!")
                     # ボット発話終了後、少し待機してから次のアクションに進む（確実に終了を確認）
                     await asyncio.sleep(0.1)
                 except asyncio.TimeoutError:
-                    logger.warning("[Orchestrator] Timeout waiting for bot speech end (15s)")
+                    logger.warning("[Orchestrator] Timeout waiting for bot speech end (5s)")
                     # タイムアウトしても続行
             
             elif action.action_type == "WAIT_FOR_TOOLCALL":
@@ -369,11 +375,11 @@ class Orchestrator:
                 try:
                     await asyncio.wait_for(
                         self.event_waiters["TOOLCALL"].wait(),
-                        timeout=15.0  # タイムアウトを15秒
+                        timeout=5.0
                     )
                     logger.debug("[Orchestrator] Toolcall detected!")
                 except asyncio.TimeoutError:
-                    logger.warning("[Orchestrator] Timeout waiting for toolcall (15s)")
+                    logger.warning("[Orchestrator] Timeout waiting for toolcall (5s)")
                     # タイムアウトしても続行
         
         # プログレスバーを閉じる

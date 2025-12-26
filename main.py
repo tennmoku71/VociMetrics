@@ -147,28 +147,30 @@ async def main():
         
         # テキスト形式の#meアクションをTTSで音声ファイルに変換
         if tts_engine:
-            # 一時ディレクトリを作成（テストIDごと）
+            # 一時ディレクトリを作成（テストIDごと、毎回新規作成）
             temp_audio_dir = Path(tempfile.gettempdir()) / "ive_tts" / test_id
+            # 既存のディレクトリがあれば削除して新規作成（キャッシュを無効化）
+            if temp_audio_dir.exists():
+                import shutil
+                shutil.rmtree(temp_audio_dir)
             temp_audio_dir.mkdir(parents=True, exist_ok=True)
             
             text_counter = 0
             for action in actions:
                 # USER_SPEECH_STARTとUSER_INTERRUPTの両方でテキストをTTS変換
                 if (action.action_type == "USER_SPEECH_START" or action.action_type == "USER_INTERRUPT") and action.text and not action.audio_file:
-                    # テキストをハッシュ化してファイル名に使用（同じテキストは再利用）
+                    # テキストをハッシュ化してファイル名に使用
+                    # テストIDごとにディレクトリが異なるため、毎回新規生成される
                     text_hash = hashlib.md5(action.text.encode('utf-8')).hexdigest()
                     audio_file_path = temp_audio_dir / f"tts_{text_counter}_{text_hash}.wav"
                     
-                    # 既に存在する場合はスキップ
-                    if not audio_file_path.exists():
-                        logger.debug(f"[TTS] テキストを音声に変換中: \"{action.text}\"")
-                        if tts_engine.synthesize(action.text, str(audio_file_path)):
-                            logger.debug(f"[TTS] 音声ファイルを保存しました: {audio_file_path}")
-                        else:
-                            logger.error(f"[TTS] 音声合成に失敗しました: \"{action.text}\"")
-                            continue
+                    # 毎回新規生成（キャッシュを無効化）
+                    logger.debug(f"[TTS] テキストを音声に変換中: \"{action.text}\"")
+                    if tts_engine.synthesize(action.text, str(audio_file_path)):
+                        logger.debug(f"[TTS] 音声ファイルを保存しました: {audio_file_path}")
                     else:
-                        logger.debug(f"[TTS] 既存の音声ファイルを使用: {audio_file_path}")
+                        logger.error(f"[TTS] 音声合成に失敗しました: \"{action.text}\"")
+                        continue
                     
                     # audio_fileに設定
                     action.audio_file = str(audio_file_path)
@@ -238,12 +240,13 @@ async def main():
             orchestrator.logger.log_bot_speech_end(vad_end_sample=vad_end_sample)
             orchestrator.notify_event("BOT_SPEECH_END")
         
-        # VAD検出器を初期化
+        # VAD検出器を初期化（設定から読み込み）
+        vad_config = config.get("vad", {})
         vad_detector = VADDetector(
             sample_rate=vad_sample_rate,  # 16000Hzで初期化
-            threshold=1.0,  # 閾値を高くして、より厳格に検出
-            min_speech_duration_ms=300,  # 最小音声継続時間を長くして、短いノイズを無視
-            min_silence_duration_ms=0,  # 遅延を0にして、割り込み検出を確実にする
+            threshold=vad_config.get("threshold", 1.0),
+            min_speech_duration_ms=vad_config.get("min_speech_duration_ms", 300),
+            min_silence_duration_ms=vad_config.get("min_silence_duration_ms", 300),
             on_speech_start=on_bot_speech_start,
             on_speech_end=on_bot_speech_end
         )

@@ -169,6 +169,32 @@
       "default": 24000
     }
   },
+  "vad": {
+    "threshold": {
+      "type": "number",
+      "min": 0.0,
+      "max": 3.0,
+      "step": 0.1,
+      "default": 1.0,
+      "description": "VAD検出の閾値（0.0-3.0）。高いほど厳格に検出します。"
+    },
+    "min_speech_duration_ms": {
+      "type": "number",
+      "min": 0,
+      "max": 1000,
+      "step": 10,
+      "default": 300,
+      "description": "最小音声継続時間（ミリ秒）。この時間以上音声が継続した場合のみ音声開始とみなします。"
+    },
+    "min_silence_duration_ms": {
+      "type": "number",
+      "min": 0,
+      "max": 1000,
+      "step": 10,
+      "default": 0,
+      "description": "最小無音継続時間（ミリ秒）。この時間以上無音が継続した場合のみ音声終了とみなします。"
+    }
+  },
   "logging": {
     "level": {
       "type": "select",

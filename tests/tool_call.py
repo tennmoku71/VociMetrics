@@ -4,16 +4,17 @@
 
 応答時間について:
 固定値として決まっている要素のみを使用した理論値（正値）:
-- サーバー側: min_silence_duration_ms=800ms（無音継続時間）
-  - ユーザーが話し終わってから、VADが無音を検知するまでに800msの無音が必要
+- サーバー側: min_silence_duration_ms（無音継続時間、config.jsonで設定可能）
+  - ユーザーが話し終わってから、VADが無音を検知するまでに設定値分の無音が必要
 - クライアント側: frame_duration_ms=20ms（VADフレーム長）
   - 20ms分の音声データが溜まるまでの時間（main.py側のVAD検知遅延）
 
-理論値（正値）: 800ms + 20ms = 820ms
+理論値（正値）: min_silence_duration_ms + 20ms
 
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -25,7 +26,6 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-import json
 import numpy as np
 import soundfile as sf
 from aiohttp import web, WSMsgType
@@ -97,8 +97,14 @@ async def websocket_handler(request):
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             tts_engine = create_tts_engine(config)
+            if tts_engine:
+                print(f"[INFO] TTSエンジンが初期化されました: {type(tts_engine).__name__}")
+            else:
+                print(f"[WARNING] TTSエンジンがNoneを返しました")
         except Exception as e:
             print(f"[WARNING] TTSエンジンの初期化に失敗しました: {e}")
+    else:
+        print(f"[WARNING] config.jsonが見つかりません: {config_path}")
     
     # VAD検出器を初期化
     input_sample_rate = 24000  # WebSocketで受信する音声のサンプルレート（OpenAI Realtime API標準）
@@ -122,14 +128,17 @@ async def websocket_handler(request):
             
             # 応答音声を送信する必要がある場合
             if should_send_response and response_audio_chunks is None:
-                # 応答音声ファイルを読み込む
-                response_audio_file = "tests/response.wav"
+                # 応答テキストを定義
+                default_text = "なるほどですね"
+                
+                # テキストをハッシュ化してファイル名に使用
+                text_hash = hashlib.md5(default_text.encode('utf-8')).hexdigest()
+                response_audio_file = f"tests/response_{text_hash}.wav"
                 
                 # 音声ファイルが存在しない場合、TTSで自動生成
                 if not os.path.exists(response_audio_file):
                     if tts_engine:
                         print(f"[TTS] 音声ファイルが見つかりません。TTSで自動生成します: {response_audio_file}")
-                        default_text = "はい、承知いたしました。"
                         # ディレクトリが存在しない場合は作成
                         os.makedirs(os.path.dirname(response_audio_file), exist_ok=True)
                         if tts_engine.synthesize(default_text, response_audio_file):
@@ -240,11 +249,24 @@ async def websocket_handler(request):
         print(f"[VAD] 立ち下がり: {timestamp:.3f}s (現在時刻: {relative_time:.3f}s, is_speaking=False、応答開始)")
         should_send_response = True
     
+    # VAD設定を読み込み（デフォルト値を使用）
+    try:
+        from pathlib import Path
+        config_path = Path(__file__).resolve().parent.parent / "config.json"
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                vad_config = config.get("vad", {})
+        else:
+            vad_config = {}
+    except Exception:
+        vad_config = {}
+    
     vad_detector = VADDetector(
         sample_rate=vad_sample_rate,  # 16000Hzで初期化
-        threshold=1.0,  # 閾値を高くして、より厳格に検出
-        min_speech_duration_ms=300,  # 最小音声継続時間を長くして、短いノイズを無視
-        min_silence_duration_ms=0,  # 遅延を0にして、割り込み検出を確実にする
+        threshold=vad_config.get("threshold", 1.0),
+        min_speech_duration_ms=vad_config.get("min_speech_duration_ms", 300),
+        min_silence_duration_ms=vad_config.get("min_silence_duration_ms", 300),
         on_speech_start=on_speech_start,
         on_speech_end=on_speech_end
     )

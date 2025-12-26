@@ -111,8 +111,8 @@ class ConvoParser:
         for line in lines:
             line = line.strip()
             
-            # コメント行をスキップ（#me, #bot, #toolcall, #interruptは除外）
-            if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot") and not line.startswith("#toolcall") and not line.startswith("#interrupt"):
+            # コメント行をスキップ（#me, #bot, #toolcall, #interrupt, #sleepは除外）
+            if line.startswith("#") and not line.startswith("#me") and not line.startswith("#bot") and not line.startswith("#toolcall") and not line.startswith("#interrupt") and not line.startswith("#sleep"):
                 continue
             
             # ユーザー発話: #me <audio_file_path> または #me <text>
@@ -260,6 +260,21 @@ class ConvoParser:
                         logger.warning(f"Invalid delay_ms in #interrupt line: {parts[1]}")
                 else:
                     logger.warning(f"Invalid #interrupt line (missing delay_ms or content): {line}")
+            
+            # 待機: #sleep <delay_ms>
+            elif line.startswith("#sleep"):
+                parts = line.split(None, 1)
+                if len(parts) > 1:
+                    try:
+                        delay_ms = int(parts[1].strip())
+                        actions.append(ScenarioAction(
+                            action_type="SLEEP",
+                            delay_ms=delay_ms
+                        ))
+                    except ValueError:
+                        logger.warning(f"Invalid delay_ms in #sleep line: {parts[1]}")
+                else:
+                    logger.warning(f"Invalid #sleep line (missing delay_ms): {line}")
         
         logger.debug(f"Parsed {len(actions)} actions from convo file")
         return actions
