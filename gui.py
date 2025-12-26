@@ -1,4 +1,4 @@
-"""Interactive Voice Evaluator (IVE) - GUI Application
+"""VociMetrics - GUI Application
 StreamlitベースのGUIアプリケーション
 """
 
@@ -34,7 +34,7 @@ logger.setLevel(logging.INFO)
 
 # ページ設定
 st.set_page_config(
-    page_title="Interactive Voice Evaluator",
+    page_title="VociMetrics",
     page_icon="🎤",
     layout="wide"
 )
@@ -47,6 +47,63 @@ TEMP_CONFIG_FILE = PROJECT_ROOT / "_config.gui.json"
 TEMP_SCENARIO_FILE = PROJECT_ROOT / "_scenario.gui.convo"
 SCENARIOS_DIR = PROJECT_ROOT / "scenarios"
 MAIN_SCRIPT = PROJECT_ROOT / "main.py"
+
+
+def inject_tooltip_css():
+    """ツールチップ用のCSSスタイルを注入"""
+    css = """
+    <style>
+    .tooltip-icon {
+        display: inline-flex;
+        justify-content: center;
+        align-items: center;
+        width: 18px;
+        height: 18px;
+        border: 1px solid #999;
+        border-radius: 50%;
+        font-size: 12px;
+        font-family: sans-serif;
+        color: #666;
+        cursor: help;
+        position: relative;
+        margin-left: 4px;
+        vertical-align: middle;
+    }
+    
+    .tooltip-icon:hover {
+        background-color: #f0f0f0;
+        border-color: #333;
+    }
+    
+    .tooltip-icon::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        bottom: 150%;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: #333;
+        color: #fff;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 11px;
+        white-space: normal;
+        width: 250px;
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        z-index: 1000;
+        text-align: left;
+        line-height: 1.4;
+    }
+    
+    .tooltip-icon:hover::after {
+        opacity: 1;
+        visibility: visible;
+    }
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
 
 
 def load_config() -> Dict[str, Any]:
@@ -137,12 +194,25 @@ def render_config_field(
     
     field_type = option.get("type")
     default_value = option.get("default")
+    description = option.get("description", "")
     # 現在の値がNoneまたは空の辞書の場合はデフォルト値を使用
     if current_value is None or (isinstance(current_value, dict) and len(current_value) == 0):
         # logger.debug(f"[render_config_field] Using default value: {default_value} (current_value was {current_value})")
         current_value = default_value
     # else:
     #     logger.debug(f"[render_config_field] Using current value: {current_value}")
+    
+    # ラベルとツールチップアイコンを表示
+    display_label = label
+    if description:
+        # HTMLでツールチップアイコンを表示
+        tooltip_html = f"""
+        <span class="tooltip-icon" data-tooltip="{description.replace('"', '&quot;')}">?</span>
+        """
+        label_with_tooltip = f"{label}{tooltip_html}"
+        st.markdown(label_with_tooltip, unsafe_allow_html=True)
+    else:
+        st.write(label)
     
     if field_type == "select":
         options_list = option.get("options", [])
@@ -151,7 +221,7 @@ def render_config_field(
                 index = options_list.index(current_value) if current_value in options_list else 0
             except (ValueError, TypeError):
                 index = 0
-            return st.selectbox(label, options_list, index=index, key=f"{'.'.join(key_path)}")
+            return st.selectbox(display_label, options_list, index=index, key=f"{'.'.join(key_path)}", label_visibility="collapsed")
     
     elif field_type == "number":
         min_val = option.get("min", 0)
@@ -184,42 +254,46 @@ def render_config_field(
                 default_value = int(default_value) if default_value is not None else 0
         
         return st.number_input(
-            label,
+            display_label,
             min_value=min_val,
             max_value=max_val,
             value=current_value if current_value is not None else default_value,
             step=step,
-            key=f"{'.'.join(key_path)}"
+            key=f"{'.'.join(key_path)}",
+            label_visibility="collapsed"
         )
     
     elif field_type == "checkbox":
         return st.checkbox(
-            label,
+            display_label,
             value=bool(current_value) if current_value is not None else bool(default_value),
             key=f"{'.'.join(key_path)}"
         )
     
     elif field_type == "text":
         return st.text_input(
-            label,
+            display_label,
             value=str(current_value) if current_value is not None else str(default_value) if default_value is not None else "",
-            key=f"{'.'.join(key_path)}"
+            key=f"{'.'.join(key_path)}",
+            label_visibility="collapsed"
         )
     
     elif field_type == "password":
         return st.text_input(
-            label,
+            display_label,
             value=str(current_value) if current_value is not None else str(default_value) if default_value is not None else "",
             type="password",
-            key=f"{'.'.join(key_path)}"
+            key=f"{'.'.join(key_path)}",
+            label_visibility="collapsed"
         )
     
     elif field_type == "textarea":
         return st.text_area(
-            label,
+            display_label,
             value=str(current_value) if current_value is not None else str(default_value) if default_value is not None else "",
             height=150,
-            key=f"{'.'.join(key_path)}"
+            key=f"{'.'.join(key_path)}",
+            label_visibility="collapsed"
         )
     
     return None
@@ -864,14 +938,35 @@ def display_results(results: Dict[str, Any]):
         ("Conversation Quality", conv_quality_score)
     ]
     
+    # 各評価項目の説明
+    score_descriptions = {
+        "Turn-taking": "応答時間や割り込みの適切さを評価します。応答遅延が短く、適切なタイミングで応答できているかを測定します。",
+        "Sound": "音声品質を評価します。SNR（信号対雑音比）やノイズプロファイル、STT信頼度を測定します。",
+        "Toolcall": "ツールコールの適切さを評価します。期待されるツールコールが正しいタイミングで、適切な引数で実行されているかを測定します。",
+        "Dialogue": "対話内容の適切さを評価します。期待される応答テキストと実際の応答テキストの一致度を測定します。",
+        "Conversation Quality": "対話全体の品質を評価します。相槌の適切さ、トーンの一貫性、おもてなしスコアを総合的に測定します。"
+    }
+    
     for label, score in scores:
         color_class = get_score_color_class(score)
         width = min(100, max(0, score)) if score is not None else 0  # 0-100の範囲に制限
         score_text = f"{score:.1f}/100" if score is not None else "N/A"
+        description = score_descriptions.get(label, "")
+        
+        # ラベルとツールチップアイコン
+        if description:
+            label_with_tooltip = f"""
+            <div class='score-label'>
+                {label}
+                <span class="tooltip-icon" data-tooltip="{description.replace('"', '&quot;')}">?</span>
+            </div>
+            """
+            st.markdown(label_with_tooltip, unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='score-label'>{label}</div>", unsafe_allow_html=True)
         
         score_html = f"""
         <div class="score-bar-container">
-            <div class="score-label">{label}</div>
             <div class="score-bar-wrapper">
                 <div class="score-bar-fill {color_class}" style="width: {width}%; max-width: 100%;">
                     {score_text if width > 15 else ""}
@@ -937,6 +1032,9 @@ def display_results(results: Dict[str, Any]):
 
 def main():
     """メイン関数"""
+    # ツールチップ用のCSSを注入
+    inject_tooltip_css()
+    
     # セッション状態の初期化
     if "config" not in st.session_state:
         try:
@@ -973,7 +1071,7 @@ def main():
         st.session_state.output_queue = None
     
     # タイトル
-    st.title("🎤 Interactive Voice Evaluator (IVE)")
+    st.title("🎤 VociMetrics")
     
     # 左右のカラムにpaddingとmarginを設定
     st.markdown("""
@@ -1010,11 +1108,21 @@ def main():
                     return f.read()
             return ""
         
+        # シナリオファイル選択とツールチップ
+        scenario_help_text = "評価に使用するシナリオファイルを選択します。.convoファイル形式で、ユーザーとボットの対話を定義します。"
+        scenario_label_html = f"""
+        <div style="display: flex; align-items: center;">
+            <span>Select Scenario File</span>
+            <span class="tooltip-icon" data-tooltip="{scenario_help_text.replace('"', '&quot;')}">?</span>
+        </div>
+        """
+        st.markdown(scenario_label_html, unsafe_allow_html=True)
         selected_scenario = st.selectbox(
-            "Select Scenario File",
+            "",
             scenario_files,
             index=0 if "dialogue.convo" in scenario_files else 0,
-            key="scenario_selectbox"
+            key="scenario_selectbox",
+            label_visibility="collapsed"
         )
         
         # ファイル選択が変更された場合は内容を再読み込み
@@ -1026,12 +1134,21 @@ def main():
         st.session_state.scenario_file = selected_scenario
         
         # シナリオファイルの内容を編集可能にする
-        st.subheader("📝 Scenario Content")
+        content_help_text = "シナリオファイルの内容を編集できます。#meでユーザー発話、#botでボット応答を定義します。#interruptで割り込み発話を定義できます。"
+        content_label_html = f"""
+        <div style="display: flex; align-items: center;">
+            <h3>📝 Scenario Content</h3>
+            <span class="tooltip-icon" data-tooltip="{content_help_text.replace('"', '&quot;')}" style="margin-left: 8px;">?</span>
+        </div>
+        """
+        st.markdown(content_label_html, unsafe_allow_html=True)
+        
         edited_scenario_content = st.text_area(
             "Edit scenario file content",
             value=st.session_state.scenario_content,
             height=400,
-            key=f"scenario_content_editor_{selected_scenario}"
+            key=f"scenario_content_editor_{selected_scenario}",
+            label_visibility="collapsed"
         )
         
         # 内容が変更された場合はセッション状態を更新

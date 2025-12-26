@@ -1,4 +1,4 @@
-## 音声対話UX評価システム：Interactive Voice Evaluator (IVE) 仕様書
+## 音声対話UX評価システム：VociMetrics 仕様書
 
 ## 1. 概要
 
@@ -89,9 +89,9 @@ JSON
 5. **三次評価**: 必要に応じて人間が録音を聴き、最終的なUXスコアを確定。
 
 
-1. 拡張仕様書：Interactive Voice Evaluator (IVE)
+1. 拡張仕様書：VociMetrics
 1.1 システムアーキテクチャ
-IVEは「Orchestrator（指揮者）」を中心に、音声ストリームとAPI通信を同時に制御・記録します。
+VociMetricsは「Orchestrator（指揮者）」を中心に、音声ストリームとAPI通信を同時に制御・記録します。
 
 1.2 実行・評価の3層構造（再定義）
 種別	実行（入力生成）	評価（品質判定）
@@ -144,11 +144,11 @@ Phase 3: AI評価・人間評価レイヤーの実装
 
 WebRTC Endpoint:
 
-テストモード時に、物理マイクの代わりにIVEからのWebRTC接続を受け入れる。
+テストモード時に、物理マイクの代わりにVociMetricsからのWebRTC接続を受け入れる。
 
 API Base URLの動的変更:
 
-テスト時のみ、外部APIの宛先をIVEのMock Server（例: http://localhost:8888）に変更する。
+テスト時のみ、外部APIの宛先をVociMetricsのMock Server（例: http://localhost:8888）に変更する。
 
 4. 技術スタック詳細
 カテゴリ	推奨ライブラリ	理由
@@ -183,7 +183,7 @@ ive-tester/
 │   └── config_loader.py    # botium.json / config.jsonの読み込み
 ├── scenarios/              # .convo ファイル置き場
 └── reports/               # 実行結果（JSON/録音）の出力先
-├── tests/                  # IVE自体のユニットテスト
+├── tests/                  # VociMetrics自体のユニットテスト
 ├── config.json             # 全体設定
 ├── requirements.txt
 └── run_ive.py              # メインエントリーポイント（CLI）

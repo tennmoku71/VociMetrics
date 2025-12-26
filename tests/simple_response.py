@@ -3,12 +3,12 @@
 
 応答時間について:
 固定値として決まっている要素のみを使用した理論値（正値）:
-- サーバー側: min_silence_duration_ms=300ms（無音継続時間）
-  - ユーザーが話し終わってから、VADが無音を検知するまでに300msの無音が必要
+- サーバー側: min_silence_duration_ms=800ms（無音継続時間）
+  - ユーザーが話し終わってから、VADが無音を検知するまでに800msの無音が必要
 - クライアント側: frame_duration_ms=20ms（VADフレーム長）
   - 20ms分の音声データが溜まるまでの時間（main.py側のVAD検知遅延）
 
-理論値（正値）: 300ms + 20ms = 320ms
+理論値（正値）: 800ms + 20ms = 820ms
 
 """
 
@@ -201,7 +201,7 @@ async def websocket_handler(request):
         sample_rate=vad_sample_rate,  # 16000Hzで初期化
         threshold=1.0,  # 閾値を高くして、より厳格に検出
         min_speech_duration_ms=300,  # 最小音声継続時間を長くして、短いノイズを無視
-        min_silence_duration_ms=300,  # 無音継続時間を長くして、途中の無音で誤検出しないようにする
+        min_silence_duration_ms=0,  # 遅延を0にして、割り込み検出を確実にする
         on_speech_start=on_speech_start,
         on_speech_end=on_speech_end
     )

@@ -1,4 +1,4 @@
-"""Interactive Voice Evaluator (IVE) - メインエントリーポイント
+"""VociMetrics - メインエントリーポイント
 WebSocketクライアントとして動作（評価ツール）
 """
 
@@ -99,7 +99,7 @@ async def main():
         log_filename = setup_logging(test_id, logs_dir="logs")
         
         logger.info("=" * 60)
-        logger.info(f"Interactive Voice Evaluator (IVE) - WebSocket Client")
+        logger.info(f"VociMetrics - WebSocket Client")
         logger.info(f"Test ID: {test_id}")
         logger.info(f"Log file: {log_filename}")
         logger.info("=" * 60)
@@ -243,7 +243,7 @@ async def main():
             sample_rate=vad_sample_rate,  # 16000Hzで初期化
             threshold=1.0,  # 閾値を高くして、より厳格に検出
             min_speech_duration_ms=300,  # 最小音声継続時間を長くして、短いノイズを無視
-            min_silence_duration_ms=300,  # 無音継続時間を長くして、途中の無音で誤検出しないようにする
+            min_silence_duration_ms=0,  # 遅延を0にして、割り込み検出を確実にする
             on_speech_start=on_bot_speech_start,
             on_speech_end=on_bot_speech_end
         )
@@ -681,7 +681,7 @@ async def main():
                         logger.info("=" * 60)
                         # turntake: Response Latency, Interrupt to Speech End, User Speech Duration, Bot Speech Duration
                         response_latency_ms = metrics.get('response_latency_ms')
-                        response_latency_threshold = config.get('evaluation', {}).get('response_latency_threshold_ms', 800)
+                        response_latency_threshold = config.get('evaluation', {}).get('response_latency_threshold_ms', 0)
                         response_latency_ok = metrics.get('response_latency_ok', False)
                         interrupt_to_end_ms = metrics.get('interrupt_to_speech_end_ms')
                         user_duration = metrics.get('user_speech_duration_ms')
