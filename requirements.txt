@@ -19,3 +19,4 @@ openai>=1.0.0  # OpenAI API（LLMベースのテキスト比較用）
 streamlit>=1.28.0  # GUIアプリケーション用
 # vosk>=0.3.45  # オプション: オフラインSTTが必要な場合のみインストール
 
+urllib3>=2.6.3 # not directly required, pinned by Snyk to avoid a vulnerability
